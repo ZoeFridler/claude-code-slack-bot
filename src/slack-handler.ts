@@ -153,7 +153,9 @@ export class SlackHandler {
 
     // Check if this is an agent command (only if there's text)
     if (text) {
+      this.logger.info('Parsing message text', { text: text.substring(0, 200) });
       const parsed = this.agentManager.parseMessage(text, channel);
+      this.logger.info('Parse result', { type: parsed.type, agentName: parsed.agentName });
       switch (parsed.type) {
         case 'create_agent':
           await this.handleCreateAgent(parsed.agentName!, parsed.args!, channel, user, thread_ts || ts, say);
@@ -256,6 +258,9 @@ export class SlackHandler {
         text: `✅ Agent *${agentName}* created on \`${result.agent!.workingDirectory}\``,
         thread_ts: threadTs,
       });
+      await say({
+        text: `[${agentName}] Hi! I'm *${agentName}* and I'll be working on \`${result.agent!.workingDirectory}\`. Mention me with \`@${agentName}\` to ask me anything about this project.`,
+      });
     } else {
       await say({
         text: `❌ ${result.error}`,
@@ -334,6 +339,7 @@ export class SlackHandler {
       say,
       processedFiles,
       messagePrefix: `[${agentName}]`,
+      bypassPermissions: true,
     });
   }
 
@@ -384,8 +390,9 @@ export class SlackHandler {
     say: any;
     processedFiles: ProcessedFile[];
     messagePrefix?: string;
+    bypassPermissions?: boolean;
   }): Promise<void> {
-    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix } = opts;
+    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix, bypassPermissions } = opts;
     const replyTs = threadTs || ts;
     const prefix = messagePrefix ? `${messagePrefix} ` : '';
 
@@ -423,8 +430,8 @@ export class SlackHandler {
       // Add thinking reaction to original message
       await this.updateMessageReaction(sessionKey, '🤔');
 
-      // Create Slack context for permission prompts
-      const slackContext = {
+      // Create Slack context for permission prompts (skip for autonomous agents)
+      const slackContext = bypassPermissions ? undefined : {
         channel,
         threadTs,
         user

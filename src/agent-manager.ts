@@ -4,12 +4,46 @@ import { config } from './config';
 import * as path from 'path';
 import * as fs from 'fs';
 
+const AGENTS_FILE = path.join(__dirname, '..', 'agents.json');
+
 export class AgentManager {
   private agents: Map<string, AgentConfig> = new Map();
   private logger = new Logger('AgentManager');
 
+  constructor() {
+    this.load();
+  }
+
   private getKey(name: string, channelId: string): string {
     return `${channelId}:${name}`;
+  }
+
+  private save(): void {
+    try {
+      const data: Record<string, AgentConfig> = {};
+      for (const [key, agent] of this.agents.entries()) {
+        data[key] = agent;
+      }
+      fs.writeFileSync(AGENTS_FILE, JSON.stringify(data, null, 2));
+      this.logger.debug('Saved agents to disk', { count: this.agents.size });
+    } catch (error) {
+      this.logger.error('Failed to save agents to disk', error);
+    }
+  }
+
+  private load(): void {
+    try {
+      if (!fs.existsSync(AGENTS_FILE)) return;
+      const raw = fs.readFileSync(AGENTS_FILE, 'utf-8');
+      const data: Record<string, AgentConfig> = JSON.parse(raw);
+      for (const [key, agent] of Object.entries(data)) {
+        agent.createdAt = new Date(agent.createdAt);
+        this.agents.set(key, agent);
+      }
+      this.logger.info('Loaded agents from disk', { count: this.agents.size });
+    } catch (error) {
+      this.logger.error('Failed to load agents from disk', error);
+    }
   }
 
   createAgent(
@@ -44,6 +78,7 @@ export class AgentManager {
     };
 
     this.agents.set(key, agent);
+    this.save();
     this.logger.info('Agent created', { name, directory: resolvedPath, channelId, userId });
     return { success: true, agent };
   }
@@ -55,6 +90,7 @@ export class AgentManager {
     }
 
     this.agents.delete(key);
+    this.save();
     this.logger.info('Agent removed', { name, channelId });
     return { success: true };
   }
