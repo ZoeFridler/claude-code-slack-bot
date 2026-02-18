@@ -32,6 +32,26 @@ export class ClaudeHandler {
     return session;
   }
 
+  getAgentSessionKey(agentName: string, channelId: string, threadTs?: string): string {
+    return `agent:${agentName}-${channelId}-${threadTs || 'direct'}`;
+  }
+
+  getAgentSession(agentName: string, channelId: string, threadTs?: string): ConversationSession | undefined {
+    return this.sessions.get(this.getAgentSessionKey(agentName, channelId, threadTs));
+  }
+
+  createAgentSession(agentName: string, channelId: string, threadTs?: string): ConversationSession {
+    const session: ConversationSession = {
+      userId: `agent:${agentName}`,
+      channelId,
+      threadTs,
+      isActive: true,
+      lastActivity: new Date(),
+    };
+    this.sessions.set(this.getAgentSessionKey(agentName, channelId, threadTs), session);
+    return session;
+  }
+
   async *streamQuery(
     prompt: string,
     session?: ConversationSession,

@@ -6,6 +6,8 @@ import { WorkingDirectoryManager } from './working-directory-manager';
 import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
+import { AgentManager } from './agent-manager';
+import { ConversationSession } from './types';
 import { permissionServer } from './permission-mcp-server';
 import { config } from './config';
 
@@ -35,6 +37,7 @@ export class SlackHandler {
   private fileHandler: FileHandler;
   private todoManager: TodoManager;
   private mcpManager: McpManager;
+  private agentManager: AgentManager;
   private todoMessages: Map<string, string> = new Map(); // sessionKey -> messageTs
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map(); // sessionKey -> original message info
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
@@ -47,6 +50,7 @@ export class SlackHandler {
     this.workingDirManager = new WorkingDirectoryManager();
     this.fileHandler = new FileHandler();
     this.todoManager = new TodoManager();
+    this.agentManager = new AgentManager();
   }
 
   async handleMessage(event: MessageEvent, say: any) {
@@ -147,6 +151,28 @@ export class SlackHandler {
       return;
     }
 
+    // Check if this is an agent command (only if there's text)
+    if (text) {
+      const parsed = this.agentManager.parseMessage(text, channel);
+      switch (parsed.type) {
+        case 'create_agent':
+          await this.handleCreateAgent(parsed.agentName!, parsed.args!, channel, user, thread_ts || ts, say);
+          return;
+        case 'remove_agent':
+          await this.handleRemoveAgent(parsed.agentName!, channel, thread_ts || ts, say);
+          return;
+        case 'list_agents':
+          await this.handleListAgents(channel, thread_ts || ts, say);
+          return;
+        case 'agent_message':
+          await this.handleAgentMessage(parsed.agentName!, parsed.args!, channel, user, thread_ts, ts, say, processedFiles);
+          return;
+        case 'broadcast':
+          await this.handleBroadcast(parsed.args!, channel, user, thread_ts, ts, say, processedFiles);
+          return;
+      }
+    }
+
     // Check if we have a working directory set
     const isDM = channel.startsWith('D');
     const workingDirectory = this.workingDirManager.getWorkingDirectory(
@@ -188,11 +214,184 @@ export class SlackHandler {
     }
 
     const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts || ts);
-    
+
+    let session = this.claudeHandler.getSession(user, channel, thread_ts || ts);
+    if (!session) {
+      this.logger.debug('Creating new session', { sessionKey });
+      session = this.claudeHandler.createSession(user, channel, thread_ts || ts);
+    } else {
+      this.logger.debug('Using existing session', { sessionKey, sessionId: session.sessionId });
+    }
+
+    // Prepare the prompt with file attachments
+    const finalPrompt = processedFiles.length > 0
+      ? await this.fileHandler.formatFilePrompt(processedFiles, text || '')
+      : text || '';
+
+    await this.executeQuery({
+      prompt: finalPrompt,
+      session,
+      sessionKey,
+      workingDirectory,
+      channel,
+      threadTs: thread_ts,
+      ts,
+      user,
+      say,
+      processedFiles,
+    });
+  }
+
+  private async handleCreateAgent(
+    agentName: string,
+    directory: string,
+    channel: string,
+    user: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.createAgent(agentName, directory, channel, user);
+    if (result.success) {
+      await say({
+        text: `✅ Agent *${agentName}* created on \`${result.agent!.workingDirectory}\``,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `❌ ${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleRemoveAgent(
+    agentName: string,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.removeAgent(agentName, channel);
+    if (result.success) {
+      await say({
+        text: `✅ Agent *${agentName}* removed.`,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `❌ ${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleListAgents(channel: string, threadTs: string, say: any): Promise<void> {
+    await say({
+      text: this.agentManager.formatAgentList(channel),
+      thread_ts: threadTs,
+    });
+  }
+
+  private async handleAgentMessage(
+    agentName: string,
+    message: string,
+    channel: string,
+    user: string,
+    threadTs: string | undefined,
+    ts: string,
+    say: any,
+    processedFiles: ProcessedFile[]
+  ): Promise<void> {
+    const agent = this.agentManager.getAgent(agentName, channel);
+    if (!agent) {
+      await say({
+        text: `❌ Agent "${agentName}" not found in this channel. Use \`list agents\` to see available agents.`,
+        thread_ts: threadTs || ts,
+      });
+      return;
+    }
+
+    const sessionKey = this.claudeHandler.getAgentSessionKey(agentName, channel, threadTs || ts);
+
+    let session = this.claudeHandler.getAgentSession(agentName, channel, threadTs || ts);
+    if (!session) {
+      session = this.claudeHandler.createAgentSession(agentName, channel, threadTs || ts);
+    }
+
+    const identityPrompt = `You are "${agentName}", working on ${agent.workingDirectory}. Prefix responses with [${agentName}]. Use claude-flow MCP memory tools to communicate with other agents.`;
+    const finalPrompt = processedFiles.length > 0
+      ? await this.fileHandler.formatFilePrompt(processedFiles, `${identityPrompt}\n\n${message}`)
+      : `${identityPrompt}\n\n${message}`;
+
+    await this.executeQuery({
+      prompt: finalPrompt,
+      session,
+      sessionKey,
+      workingDirectory: agent.workingDirectory,
+      channel,
+      threadTs,
+      ts,
+      user,
+      say,
+      processedFiles,
+      messagePrefix: `[${agentName}]`,
+    });
+  }
+
+  private async handleBroadcast(
+    message: string,
+    channel: string,
+    user: string,
+    threadTs: string | undefined,
+    ts: string,
+    say: any,
+    processedFiles: ProcessedFile[]
+  ): Promise<void> {
+    const agents = this.agentManager.listAgents(channel);
+    if (agents.length === 0) {
+      await say({
+        text: 'No agents configured in this channel. Use `create agent <name> on <path>` to add one.',
+        thread_ts: threadTs || ts,
+      });
+      return;
+    }
+
+    await say({
+      text: `Broadcasting to ${agents.length} agent(s): ${agents.map(a => `*${a.name}*`).join(', ')}`,
+      thread_ts: threadTs || ts,
+    });
+
+    const results = await Promise.allSettled(
+      agents.map(agent =>
+        this.handleAgentMessage(agent.name, message, channel, user, threadTs, ts, say, processedFiles)
+      )
+    );
+
+    const failures = results.filter(r => r.status === 'rejected');
+    if (failures.length > 0) {
+      this.logger.error('Some broadcast agents failed', { failureCount: failures.length });
+    }
+  }
+
+  private async executeQuery(opts: {
+    prompt: string;
+    session: ConversationSession;
+    sessionKey: string;
+    workingDirectory: string;
+    channel: string;
+    threadTs: string | undefined;
+    ts: string;
+    user: string;
+    say: any;
+    processedFiles: ProcessedFile[];
+    messagePrefix?: string;
+  }): Promise<void> {
+    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix } = opts;
+    const replyTs = threadTs || ts;
+    const prefix = messagePrefix ? `${messagePrefix} ` : '';
+
     // Store the original message info for status reactions
-    const originalMessageTs = thread_ts || ts;
-    this.originalMessages.set(sessionKey, { channel, ts: originalMessageTs });
-    
+    this.originalMessages.set(sessionKey, { channel, ts: replyTs });
+
     // Cancel any existing request for this conversation
     const existingController = this.activeControllers.get(sessionKey);
     if (existingController) {
@@ -203,25 +402,12 @@ export class SlackHandler {
     const abortController = new AbortController();
     this.activeControllers.set(sessionKey, abortController);
 
-    let session = this.claudeHandler.getSession(user, channel, thread_ts || ts);
-    if (!session) {
-      this.logger.debug('Creating new session', { sessionKey });
-      session = this.claudeHandler.createSession(user, channel, thread_ts || ts);
-    } else {
-      this.logger.debug('Using existing session', { sessionKey, sessionId: session.sessionId });
-    }
-
     let currentMessages: string[] = [];
     let statusMessageTs: string | undefined;
 
     try {
-      // Prepare the prompt with file attachments
-      const finalPrompt = processedFiles.length > 0 
-        ? await this.fileHandler.formatFilePrompt(processedFiles, text || '')
-        : text || '';
-
-      this.logger.info('Sending query to Claude Code SDK', { 
-        prompt: finalPrompt.substring(0, 200) + (finalPrompt.length > 200 ? '...' : ''), 
+      this.logger.info('Sending query to Claude Code SDK', {
+        prompt: prompt.substring(0, 200) + (prompt.length > 200 ? '...' : ''),
         sessionId: session.sessionId,
         workingDirectory,
         fileCount: processedFiles.length,
@@ -229,22 +415,22 @@ export class SlackHandler {
 
       // Send initial status message
       const statusResult = await say({
-        text: '🤔 *Thinking...*',
-        thread_ts: thread_ts || ts,
+        text: `${prefix}🤔 *Thinking...*`,
+        thread_ts: replyTs,
       });
       statusMessageTs = statusResult.ts;
 
-      // Add thinking reaction to original message (but don't spam if already set)
+      // Add thinking reaction to original message
       await this.updateMessageReaction(sessionKey, '🤔');
-      
+
       // Create Slack context for permission prompts
       const slackContext = {
         channel,
-        threadTs: thread_ts,
+        threadTs,
         user
       };
-      
-      for await (const message of this.claudeHandler.streamQuery(finalPrompt, session, abortController, workingDirectory, slackContext)) {
+
+      for await (const message of this.claudeHandler.streamQuery(prompt, session, abortController, workingDirectory, slackContext)) {
         if (abortController.signal.aborted) break;
 
         this.logger.debug('Received message from Claude SDK', {
@@ -254,50 +440,43 @@ export class SlackHandler {
         });
 
         if (message.type === 'assistant') {
-          // Check if this is a tool use message
           const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
-          
+
           if (hasToolUse) {
-            // Update status to show working
             if (statusMessageTs) {
               await this.app.client.chat.update({
                 channel,
                 ts: statusMessageTs,
-                text: '⚙️ *Working...*',
+                text: `${prefix}⚙️ *Working...*`,
               });
             }
 
-            // Update reaction to show working
             await this.updateMessageReaction(sessionKey, '⚙️');
 
-            // Check for TodoWrite tool and handle it specially
-            const todoTool = message.message.content?.find((part: any) => 
+            const todoTool = message.message.content?.find((part: any) =>
               part.type === 'tool_use' && part.name === 'TodoWrite'
             );
 
             if (todoTool) {
-              await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, thread_ts || ts, say);
+              await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, replyTs, say);
             }
 
-            // For other tool use messages, format them immediately as new messages
             const toolContent = this.formatToolUse(message.message.content);
-            if (toolContent) { // Only send if there's content (TodoWrite returns empty string)
+            if (toolContent) {
               await say({
-                text: toolContent,
-                thread_ts: thread_ts || ts,
+                text: `${prefix}${toolContent}`,
+                thread_ts: replyTs,
               });
             }
           } else {
-            // Handle regular text content
             const content = this.extractTextContent(message);
             if (content) {
               currentMessages.push(content);
-              
-              // Send each new piece of content as a separate message
+
               const formatted = this.formatMessage(content, false);
               await say({
-                text: formatted,
-                thread_ts: thread_ts || ts,
+                text: `${prefix}${formatted}`,
+                thread_ts: replyTs,
               });
             }
           }
@@ -308,14 +487,14 @@ export class SlackHandler {
             totalCost: (message as any).total_cost_usd,
             duration: (message as any).duration_ms,
           });
-          
+
           if (message.subtype === 'success' && (message as any).result) {
             const finalResult = (message as any).result;
             if (finalResult && !currentMessages.includes(finalResult)) {
               const formatted = this.formatMessage(finalResult, true);
               await say({
-                text: formatted,
-                thread_ts: thread_ts || ts,
+                text: `${prefix}${formatted}`,
+                thread_ts: replyTs,
               });
             }
           }
@@ -327,11 +506,10 @@ export class SlackHandler {
         await this.app.client.chat.update({
           channel,
           ts: statusMessageTs,
-          text: '✅ *Task completed*',
+          text: `${prefix}✅ *Task completed*`,
         });
       }
 
-      // Update reaction to show completion
       await this.updateMessageReaction(sessionKey, '✅');
 
       this.logger.info('Completed processing message', {
@@ -339,62 +517,54 @@ export class SlackHandler {
         messageCount: currentMessages.length,
       });
 
-      // Clean up temporary files
       if (processedFiles.length > 0) {
         await this.fileHandler.cleanupTempFiles(processedFiles);
       }
     } catch (error: any) {
       if (error.name !== 'AbortError') {
         this.logger.error('Error handling message', error);
-        
-        // Update status to error
+
         if (statusMessageTs) {
           await this.app.client.chat.update({
             channel,
             ts: statusMessageTs,
-            text: '❌ *Error occurred*',
+            text: `${prefix}❌ *Error occurred*`,
           });
         }
 
-        // Update reaction to show error
         await this.updateMessageReaction(sessionKey, '❌');
-        
+
         await say({
-          text: `Error: ${error.message || 'Something went wrong'}`,
-          thread_ts: thread_ts || ts,
+          text: `${prefix}Error: ${error.message || 'Something went wrong'}`,
+          thread_ts: replyTs,
         });
       } else {
         this.logger.debug('Request was aborted', { sessionKey });
-        
-        // Update status to cancelled
+
         if (statusMessageTs) {
           await this.app.client.chat.update({
             channel,
             ts: statusMessageTs,
-            text: '⏹️ *Cancelled*',
+            text: `${prefix}⏹️ *Cancelled*`,
           });
         }
 
-        // Update reaction to show cancellation
         await this.updateMessageReaction(sessionKey, '⏹️');
       }
 
-      // Clean up temporary files in case of error too
       if (processedFiles.length > 0) {
         await this.fileHandler.cleanupTempFiles(processedFiles);
       }
     } finally {
       this.activeControllers.delete(sessionKey);
-      
-      // Clean up todo tracking if session ended
+
       if (session?.sessionId) {
-        // Don't immediately clean up - keep todos visible for a while
         setTimeout(() => {
           this.todoManager.cleanupSession(session.sessionId!);
           this.todoMessages.delete(sessionKey);
           this.originalMessages.delete(sessionKey);
           this.currentReactions.delete(sessionKey);
-        }, 5 * 60 * 1000); // 5 minutes
+        }, 5 * 60 * 1000);
       }
     }
   }

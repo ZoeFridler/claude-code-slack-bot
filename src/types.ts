@@ -15,3 +15,17 @@ export interface WorkingDirectoryConfig {
   directory: string;
   setAt: Date;
 }
+
+export interface AgentConfig {
+  name: string;
+  workingDirectory: string;
+  channelId: string;
+  createdBy: string;
+  createdAt: Date;
+}
+
+export interface ParsedCommand {
+  type: 'create_agent' | 'remove_agent' | 'list_agents' | 'broadcast' | 'agent_message' | 'none';
+  agentName?: string;
+  args?: string;
+}
