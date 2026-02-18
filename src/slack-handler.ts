@@ -257,6 +257,9 @@ export class SlackHandler {
         case 'list_templates':
           await this.handleListTemplates(thread_ts || ts, say);
           return;
+        case 'help':
+          await say({ text: this.agentManager.formatHelp(), thread_ts: thread_ts || ts });
+          return;
         case 'agent_message':
           await this.handleAgentMessage(parsed.agentName!, parsed.args!, channel, user, thread_ts, ts, say, processedFiles);
           return;

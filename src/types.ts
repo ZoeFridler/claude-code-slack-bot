@@ -64,6 +64,7 @@ export interface ParsedCommand {
     | 'list_schedules'
     | 'create_from_template'
     | 'list_templates'
+    | 'help'
     | 'none';
   agentName?: string;
   targetAgent?: string;

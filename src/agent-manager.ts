@@ -475,6 +475,11 @@ export class AgentManager {
       return { type: 'list_templates' };
     }
 
+    // help
+    if (/^(help|commands)$/i.test(trimmed)) {
+      return { type: 'help' };
+    }
+
     // list agents
     if (/^list\s+agents?$/i.test(trimmed)) {
       return { type: 'list_agents' };
@@ -593,6 +598,39 @@ export class AgentManager {
     }
     message += `\nUse \`create agent <name> from <template> on <path>\` to create an agent with a template.`;
     return message;
+  }
+
+  formatHelp(): string {
+    let msg = `*Available Commands:*\n\n`;
+    msg += `*Agent Management*\n`;
+    msg += `\`create agent <name> on <path>\` — Create a new agent\n`;
+    msg += `\`create agent <name> from <template> on <path>\` — Create from template\n`;
+    msg += `\`remove agent <name>\` — Remove an agent\n`;
+    msg += `\`rename agent <old> to <new>\` — Rename an agent\n`;
+    msg += `\`list agents\` — List all agents in this channel\n\n`;
+    msg += `*Agent Configuration*\n`;
+    msg += `\`rules <agent> <text>\` — Set rules/system prompt\n`;
+    msg += `\`clear rules <agent>\` — Remove rules\n`;
+    msg += `\`quiet <agent> on|off\` — Toggle quiet mode (suppress tool messages)\n`;
+    msg += `\`status <agent>\` — Show agent details and status\n\n`;
+    msg += `*Messaging*\n`;
+    msg += `\`@<agent> <message>\` — Send a message to an agent\n`;
+    msg += `\`@all <message>\` — Broadcast to all agents\n`;
+    msg += `\`@<agent1> ask @<agent2> <question>\` — Agent-to-agent query\n\n`;
+    msg += `*Scheduled Tasks*\n`;
+    msg += `\`schedule <agent> every <N> <min|hours|days> <message>\` — Schedule a recurring task\n`;
+    msg += `\`unschedule <id>\` — Remove a scheduled task\n`;
+    msg += `\`schedules\` — List all scheduled tasks\n\n`;
+    msg += `*Templates*\n`;
+    msg += `\`templates\` — List available agent templates\n\n`;
+    msg += `*Working Directory*\n`;
+    msg += `\`cwd <path>\` — Set working directory\n`;
+    msg += `\`cwd\` — Show current working directory\n\n`;
+    msg += `*MCP Servers*\n`;
+    msg += `\`mcp\` — Show MCP server info\n`;
+    msg += `\`mcp reload\` — Reload MCP configuration\n\n`;
+    msg += `Type \`help\` anytime to see this list.`;
+    return msg;
   }
 
   private resolveDirectory(directory: string): string | null {
