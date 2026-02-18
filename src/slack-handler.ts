@@ -153,9 +153,7 @@ export class SlackHandler {
 
     // Check if this is an agent command (only if there's text)
     if (text) {
-      this.logger.info('Parsing message text', { text: text.substring(0, 200) });
       const parsed = this.agentManager.parseMessage(text, channel);
-      this.logger.info('Parse result', { type: parsed.type, agentName: parsed.agentName });
       switch (parsed.type) {
         case 'create_agent':
           await this.handleCreateAgent(parsed.agentName!, parsed.args!, channel, user, thread_ts || ts, say);
