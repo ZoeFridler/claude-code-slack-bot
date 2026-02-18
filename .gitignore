@@ -35,4 +35,6 @@ yarn-error.log*
 
 # Testing
 coverage/
-.nyc_output/agents.json
+.nyc_output/
+agents.json
+schedules.json

@@ -22,10 +22,50 @@ export interface AgentConfig {
   channelId: string;
   createdBy: string;
   createdAt: Date;
+  rules?: string;
+  quietMode?: boolean;
+  template?: string;
+}
+
+export type AgentStatus = 'idle' | 'processing' | 'error';
+
+export interface ScheduledTask {
+  id: string;
+  agentName: string;
+  channelId: string;
+  message: string;
+  intervalMs: number;
+  intervalLabel: string;
+  createdBy: string;
+  createdAt: Date;
+}
+
+export interface AgentTemplate {
+  name: string;
+  description: string;
+  rules: string;
 }
 
 export interface ParsedCommand {
-  type: 'create_agent' | 'remove_agent' | 'list_agents' | 'broadcast' | 'agent_message' | 'none';
+  type:
+    | 'create_agent'
+    | 'remove_agent'
+    | 'list_agents'
+    | 'broadcast'
+    | 'agent_message'
+    | 'set_rules'
+    | 'clear_rules'
+    | 'rename_agent'
+    | 'agent_status'
+    | 'quiet_mode'
+    | 'agent_ask_agent'
+    | 'schedule'
+    | 'unschedule'
+    | 'list_schedules'
+    | 'create_from_template'
+    | 'list_templates'
+    | 'none';
   agentName?: string;
+  targetAgent?: string;
   args?: string;
 }

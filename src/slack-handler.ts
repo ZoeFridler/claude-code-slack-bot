@@ -7,7 +7,7 @@ import { FileHandler, ProcessedFile } from './file-handler';
 import { TodoManager, Todo } from './todo-manager';
 import { McpManager } from './mcp-manager';
 import { AgentManager } from './agent-manager';
-import { ConversationSession } from './types';
+import { ConversationSession, AgentStatus } from './types';
 import { permissionServer } from './permission-mcp-server';
 import { config } from './config';
 
@@ -41,6 +41,7 @@ export class SlackHandler {
   private todoMessages: Map<string, string> = new Map(); // sessionKey -> messageTs
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map(); // sessionKey -> original message info
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
+  private agentStatuses: Map<string, AgentStatus> = new Map(); // agentKey -> status
   private botUserId: string | null = null;
 
   constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
@@ -51,20 +52,79 @@ export class SlackHandler {
     this.fileHandler = new FileHandler();
     this.todoManager = new TodoManager();
     this.agentManager = new AgentManager();
+
+    // Set up scheduled task callback
+    this.agentManager.setScheduleCallback(async (task) => {
+      this.logger.info('Running scheduled task', { taskId: task.id, agent: task.agentName });
+      const agent = this.agentManager.getAgent(task.agentName, task.channelId);
+      if (!agent) {
+        this.logger.warn('Scheduled task agent not found', { taskId: task.id, agent: task.agentName });
+        return;
+      }
+
+      // Post a message indicating the scheduled task is running
+      await this.app.client.chat.postMessage({
+        channel: task.channelId,
+        text: `[${task.agentName}] :clock1: Running scheduled task: "${task.message}"`,
+      });
+
+      // Execute the agent message
+      const sessionKey = this.claudeHandler.getAgentSessionKey(task.agentName, task.channelId, 'scheduled');
+      let session = this.claudeHandler.getAgentSession(task.agentName, task.channelId, 'scheduled');
+      if (!session) {
+        session = this.claudeHandler.createAgentSession(task.agentName, task.channelId, 'scheduled');
+      }
+
+      const identityPrompt = this.buildIdentityPrompt(agent);
+      const finalPrompt = `${identityPrompt}\n\n${task.message}`;
+
+      // Use a temporary say function that posts to the channel
+      const say = async (msg: any) => {
+        return await this.app.client.chat.postMessage({
+          channel: task.channelId,
+          text: msg.text,
+          thread_ts: msg.thread_ts,
+        });
+      };
+
+      await this.executeQuery({
+        prompt: finalPrompt,
+        session,
+        sessionKey,
+        workingDirectory: agent.workingDirectory,
+        channel: task.channelId,
+        threadTs: undefined,
+        ts: Date.now().toString(),
+        user: task.createdBy,
+        say,
+        processedFiles: [],
+        messagePrefix: `[${task.agentName}]`,
+        bypassPermissions: true,
+        quietMode: agent.quietMode,
+      });
+    });
+  }
+
+  private buildIdentityPrompt(agent: { name: string; workingDirectory: string; rules?: string }): string {
+    let prompt = `You are "${agent.name}", working on ${agent.workingDirectory}. Prefix responses with [${agent.name}]. Use claude-flow MCP memory tools to communicate with other agents.`;
+    if (agent.rules) {
+      prompt += `\n\nYour rules:\n${agent.rules}`;
+    }
+    return prompt;
   }
 
   async handleMessage(event: MessageEvent, say: any) {
     const { user, channel, thread_ts, ts, text, files } = event;
-    
+
     // Process any attached files
     let processedFiles: ProcessedFile[] = [];
     if (files && files.length > 0) {
       this.logger.info('Processing uploaded files', { count: files.length });
       processedFiles = await this.fileHandler.downloadAndProcessFiles(files);
-      
+
       if (processedFiles.length > 0) {
         await say({
-          text: `📎 Processing ${processedFiles.length} file(s): ${processedFiles.map(f => f.name).join(', ')}`,
+          text: `Processing ${processedFiles.length} file(s): ${processedFiles.map(f => f.name).join(', ')}`,
           thread_ts: thread_ts || ts,
         });
       }
@@ -96,12 +156,12 @@ export class SlackHandler {
       if (result.success) {
         const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
         await say({
-          text: `✅ Working directory set for ${context}: \`${result.resolvedPath}\``,
+          text: `Working directory set for ${context}: \`${result.resolvedPath}\``,
           thread_ts: thread_ts || ts,
         });
       } else {
         await say({
-          text: `❌ ${result.error}`,
+          text: `${result.error}`,
           thread_ts: thread_ts || ts,
         });
       }
@@ -117,7 +177,7 @@ export class SlackHandler {
         isDM ? user : undefined
       );
       const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
-      
+
       await say({
         text: this.workingDirManager.formatDirectoryMessage(directory, context),
         thread_ts: thread_ts || ts,
@@ -139,12 +199,12 @@ export class SlackHandler {
       const reloaded = this.mcpManager.reloadConfiguration();
       if (reloaded) {
         await say({
-          text: `✅ MCP configuration reloaded successfully.\n\n${this.mcpManager.formatMcpInfo()}`,
+          text: `MCP configuration reloaded successfully.\n\n${this.mcpManager.formatMcpInfo()}`,
           thread_ts: thread_ts || ts,
         });
       } else {
         await say({
-          text: `❌ Failed to reload MCP configuration. Check the mcp-servers.json file.`,
+          text: `Failed to reload MCP configuration. Check the mcp-servers.json file.`,
           thread_ts: thread_ts || ts,
         });
       }
@@ -158,11 +218,44 @@ export class SlackHandler {
         case 'create_agent':
           await this.handleCreateAgent(parsed.agentName!, parsed.args!, channel, user, thread_ts || ts, say);
           return;
+        case 'create_from_template':
+          await this.handleCreateAgentFromTemplate(parsed.agentName!, parsed.targetAgent!, parsed.args!, channel, user, thread_ts || ts, say);
+          return;
         case 'remove_agent':
           await this.handleRemoveAgent(parsed.agentName!, channel, thread_ts || ts, say);
           return;
+        case 'rename_agent':
+          await this.handleRenameAgent(parsed.agentName!, parsed.args!, channel, thread_ts || ts, say);
+          return;
         case 'list_agents':
           await this.handleListAgents(channel, thread_ts || ts, say);
+          return;
+        case 'set_rules':
+          await this.handleSetRules(parsed.agentName!, parsed.args!, channel, thread_ts || ts, say);
+          return;
+        case 'clear_rules':
+          await this.handleClearRules(parsed.agentName!, channel, thread_ts || ts, say);
+          return;
+        case 'quiet_mode':
+          await this.handleQuietMode(parsed.agentName!, parsed.args! === 'on', channel, thread_ts || ts, say);
+          return;
+        case 'agent_status':
+          await this.handleAgentStatus(parsed.agentName!, channel, thread_ts || ts, say);
+          return;
+        case 'agent_ask_agent':
+          await this.handleAgentAskAgent(parsed.agentName!, parsed.targetAgent!, parsed.args!, channel, user, thread_ts, ts, say, processedFiles);
+          return;
+        case 'schedule':
+          await this.handleSchedule(parsed.agentName!, parsed.targetAgent!, parsed.args!, channel, user, thread_ts || ts, say);
+          return;
+        case 'unschedule':
+          await this.handleUnschedule(parsed.args!, channel, thread_ts || ts, say);
+          return;
+        case 'list_schedules':
+          await this.handleListSchedules(channel, thread_ts || ts, say);
+          return;
+        case 'list_templates':
+          await this.handleListTemplates(thread_ts || ts, say);
           return;
         case 'agent_message':
           await this.handleAgentMessage(parsed.agentName!, parsed.args!, channel, user, thread_ts, ts, say, processedFiles);
@@ -183,8 +276,8 @@ export class SlackHandler {
 
     // Working directory is always required
     if (!workingDirectory) {
-      let errorMessage = `⚠️ No working directory set. `;
-      
+      let errorMessage = `No working directory set. `;
+
       if (!isDM && !this.workingDirManager.hasChannelWorkingDirectory(channel)) {
         // No channel default set
         errorMessage += `Please set a default working directory for this channel first using:\n`;
@@ -205,7 +298,7 @@ export class SlackHandler {
       } else {
         errorMessage += `Please set one first using:\n\`cwd /path/to/directory\``;
       }
-      
+
       await say({
         text: errorMessage,
         thread_ts: thread_ts || ts,
@@ -253,7 +346,7 @@ export class SlackHandler {
     const result = this.agentManager.createAgent(agentName, directory, channel, user);
     if (result.success) {
       await say({
-        text: `✅ Agent *${agentName}* created on \`${result.agent!.workingDirectory}\``,
+        text: `Agent *${agentName}* created on \`${result.agent!.workingDirectory}\``,
         thread_ts: threadTs,
       });
       await say({
@@ -261,7 +354,34 @@ export class SlackHandler {
       });
     } else {
       await say({
-        text: `❌ ${result.error}`,
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleCreateAgentFromTemplate(
+    agentName: string,
+    templateName: string,
+    directory: string,
+    channel: string,
+    user: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.createAgent(agentName, directory, channel, user, templateName);
+    if (result.success) {
+      const template = this.agentManager.getTemplate(templateName);
+      await say({
+        text: `Agent *${agentName}* created on \`${result.agent!.workingDirectory}\` using template *${templateName}*`,
+        thread_ts: threadTs,
+      });
+      await say({
+        text: `[${agentName}] Hi! I'm *${agentName}* (${template?.description || templateName}) and I'll be working on \`${result.agent!.workingDirectory}\`. Mention me with \`@${agentName}\` to ask me anything.`,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
         thread_ts: threadTs,
       });
     }
@@ -275,13 +395,43 @@ export class SlackHandler {
   ): Promise<void> {
     const result = this.agentManager.removeAgent(agentName, channel);
     if (result.success) {
+      this.agentStatuses.delete(`${channel}:${agentName}`);
       await say({
-        text: `✅ Agent *${agentName}* removed.`,
+        text: `Agent *${agentName}* removed.`,
         thread_ts: threadTs,
       });
     } else {
       await say({
-        text: `❌ ${result.error}`,
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleRenameAgent(
+    oldName: string,
+    newName: string,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.renameAgent(oldName, newName, channel);
+    if (result.success) {
+      // Transfer status
+      const oldKey = `${channel}:${oldName}`;
+      const newKey = `${channel}:${newName}`;
+      const status = this.agentStatuses.get(oldKey);
+      if (status) {
+        this.agentStatuses.set(newKey, status);
+        this.agentStatuses.delete(oldKey);
+      }
+      await say({
+        text: `Agent *${oldName}* renamed to *${newName}*.`,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
         thread_ts: threadTs,
       });
     }
@@ -289,7 +439,161 @@ export class SlackHandler {
 
   private async handleListAgents(channel: string, threadTs: string, say: any): Promise<void> {
     await say({
-      text: this.agentManager.formatAgentList(channel),
+      text: this.agentManager.formatAgentList(channel, this.agentStatuses),
+      thread_ts: threadTs,
+    });
+  }
+
+  private async handleSetRules(
+    agentName: string,
+    rules: string,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.setRules(agentName, channel, rules);
+    if (result.success) {
+      await say({
+        text: `Rules updated for *${agentName}*:\n\`\`\`\n${rules}\n\`\`\``,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleClearRules(
+    agentName: string,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.clearRules(agentName, channel);
+    if (result.success) {
+      await say({
+        text: `Rules cleared for *${agentName}*.`,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleQuietMode(
+    agentName: string,
+    quiet: boolean,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.setQuietMode(agentName, channel, quiet);
+    if (result.success) {
+      await say({
+        text: `Quiet mode ${quiet ? 'enabled' : 'disabled'} for *${agentName}*.${quiet ? ' Tool use messages will be suppressed.' : ''}`,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleAgentStatus(
+    agentName: string,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const agent = this.agentManager.getAgent(agentName, channel);
+    if (!agent) {
+      await say({
+        text: `Agent "${agentName}" not found in this channel.`,
+        thread_ts: threadTs,
+      });
+      return;
+    }
+
+    const agentKey = `${channel}:${agentName}`;
+    const status = this.agentStatuses.get(agentKey) || 'idle';
+    const schedules = this.agentManager.listSchedules(channel).filter(s => s.agentName === agentName);
+
+    await say({
+      text: this.agentManager.formatAgentStatus(agent, status, schedules),
+      thread_ts: threadTs,
+    });
+  }
+
+  private async handleSchedule(
+    agentName: string,
+    intervalStr: string,
+    message: string,
+    channel: string,
+    user: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const parts = intervalStr.split(' ');
+    const intervalMs = this.agentManager.parseInterval(parts[0], parts[1]);
+    if (!intervalMs) {
+      await say({
+        text: `Invalid interval: "${intervalStr}". Use format: \`<number> <minutes|hours|days>\``,
+        thread_ts: threadTs,
+      });
+      return;
+    }
+
+    const result = this.agentManager.addSchedule(agentName, channel, message, intervalMs, intervalStr, user);
+    if (result.success) {
+      await say({
+        text: `Scheduled task for *${agentName}*: "${message}" every ${intervalStr}\nTask ID: \`${result.task!.id}\``,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleUnschedule(
+    scheduleId: string,
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.removeSchedule(scheduleId, channel);
+    if (result.success) {
+      await say({
+        text: `Scheduled task \`${scheduleId}\` removed.`,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
+  private async handleListSchedules(channel: string, threadTs: string, say: any): Promise<void> {
+    await say({
+      text: this.agentManager.formatScheduleList(channel),
+      thread_ts: threadTs,
+    });
+  }
+
+  private async handleListTemplates(threadTs: string, say: any): Promise<void> {
+    await say({
+      text: this.agentManager.formatTemplateList(),
       thread_ts: threadTs,
     });
   }
@@ -307,7 +611,7 @@ export class SlackHandler {
     const agent = this.agentManager.getAgent(agentName, channel);
     if (!agent) {
       await say({
-        text: `❌ Agent "${agentName}" not found in this channel. Use \`list agents\` to see available agents.`,
+        text: `Agent "${agentName}" not found in this channel. Use \`list agents\` to see available agents.`,
         thread_ts: threadTs || ts,
       });
       return;
@@ -320,25 +624,138 @@ export class SlackHandler {
       session = this.claudeHandler.createAgentSession(agentName, channel, threadTs || ts);
     }
 
-    const identityPrompt = `You are "${agentName}", working on ${agent.workingDirectory}. Prefix responses with [${agentName}]. Use claude-flow MCP memory tools to communicate with other agents.`;
+    const identityPrompt = this.buildIdentityPrompt(agent);
     const finalPrompt = processedFiles.length > 0
       ? await this.fileHandler.formatFilePrompt(processedFiles, `${identityPrompt}\n\n${message}`)
       : `${identityPrompt}\n\n${message}`;
 
-    await this.executeQuery({
-      prompt: finalPrompt,
-      session,
-      sessionKey,
-      workingDirectory: agent.workingDirectory,
+    // Update status
+    const agentKey = `${channel}:${agentName}`;
+    this.agentStatuses.set(agentKey, 'processing');
+
+    try {
+      await this.executeQuery({
+        prompt: finalPrompt,
+        session,
+        sessionKey,
+        workingDirectory: agent.workingDirectory,
+        channel,
+        threadTs,
+        ts,
+        user,
+        say,
+        processedFiles,
+        messagePrefix: `[${agentName}]`,
+        bypassPermissions: true,
+        quietMode: agent.quietMode,
+      });
+      this.agentStatuses.set(agentKey, 'idle');
+    } catch (error) {
+      this.agentStatuses.set(agentKey, 'error');
+      throw error;
+    }
+  }
+
+  private async handleAgentAskAgent(
+    askingAgent: string,
+    targetAgent: string,
+    question: string,
+    channel: string,
+    user: string,
+    threadTs: string | undefined,
+    ts: string,
+    say: any,
+    processedFiles: ProcessedFile[]
+  ): Promise<void> {
+    const asker = this.agentManager.getAgent(askingAgent, channel);
+    const target = this.agentManager.getAgent(targetAgent, channel);
+
+    if (!asker || !target) {
+      const missing = !asker ? askingAgent : targetAgent;
+      await say({
+        text: `Agent "${missing}" not found in this channel.`,
+        thread_ts: threadTs || ts,
+      });
+      return;
+    }
+
+    // Step 1: Ask the target agent the question
+    await say({
+      text: `[${askingAgent}] Asking *${targetAgent}* about: "${question}"`,
+      thread_ts: threadTs || ts,
+    });
+
+    // Collect target agent's response
+    const targetSessionKey = this.claudeHandler.getAgentSessionKey(targetAgent, channel, `cross-${ts}`);
+    let targetSession = this.claudeHandler.getAgentSession(targetAgent, channel, `cross-${ts}`);
+    if (!targetSession) {
+      targetSession = this.claudeHandler.createAgentSession(targetAgent, channel, `cross-${ts}`);
+    }
+
+    const targetPrompt = `${this.buildIdentityPrompt(target)}\n\n${question}`;
+
+    // Track target status
+    const targetKey = `${channel}:${targetAgent}`;
+    this.agentStatuses.set(targetKey, 'processing');
+
+    let targetResponse = '';
+    try {
+      const abortController = new AbortController();
+      for await (const message of this.claudeHandler.streamQuery(
+        targetPrompt,
+        targetSession,
+        abortController,
+        target.workingDirectory,
+        undefined // bypass permissions
+      )) {
+        if (message.type === 'assistant') {
+          const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
+          if (!hasToolUse) {
+            const textParts = message.message.content
+              ?.filter((part: any) => part.type === 'text')
+              .map((part: any) => part.text);
+            if (textParts?.length) {
+              targetResponse += textParts.join('');
+            }
+          }
+        } else if (message.type === 'result' && message.subtype === 'success') {
+          const result = (message as any).result;
+          if (result && !targetResponse.includes(result)) {
+            targetResponse = result;
+          }
+        }
+      }
+      this.agentStatuses.set(targetKey, 'idle');
+    } catch (error) {
+      this.agentStatuses.set(targetKey, 'error');
+      await say({
+        text: `[${targetAgent}] Error: ${(error as any).message || 'Failed to respond'}`,
+        thread_ts: threadTs || ts,
+      });
+      return;
+    }
+
+    // Post target's response
+    if (targetResponse) {
+      await say({
+        text: `[${targetAgent}] ${this.formatMessage(targetResponse, true)}`,
+        thread_ts: threadTs || ts,
+      });
+    }
+
+    // Step 2: Send target's response to the asking agent
+    const followUp = `Here's what ${targetAgent} said in response to "${question}":\n\n${targetResponse}\n\nNow respond to the user based on this information and your own knowledge.`;
+
+    await this.handleAgentMessage(
+      askingAgent,
+      followUp,
       channel,
+      user,
       threadTs,
       ts,
-      user,
       say,
-      processedFiles,
-      messagePrefix: `[${agentName}]`,
-      bypassPermissions: true,
-    });
+      processedFiles
+    );
   }
 
   private async handleBroadcast(
@@ -389,8 +806,9 @@ export class SlackHandler {
     processedFiles: ProcessedFile[];
     messagePrefix?: string;
     bypassPermissions?: boolean;
+    quietMode?: boolean;
   }): Promise<void> {
-    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix, bypassPermissions } = opts;
+    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix, bypassPermissions, quietMode } = opts;
     const replyTs = threadTs || ts;
     const prefix = messagePrefix ? `${messagePrefix} ` : '';
 
@@ -420,13 +838,13 @@ export class SlackHandler {
 
       // Send initial status message
       const statusResult = await say({
-        text: `${prefix}🤔 *Thinking...*`,
+        text: `${prefix}:thinking_face: *Thinking...*`,
         thread_ts: replyTs,
       });
       statusMessageTs = statusResult.ts;
 
       // Add thinking reaction to original message
-      await this.updateMessageReaction(sessionKey, '🤔');
+      await this.updateMessageReaction(sessionKey, 'thinking_face');
 
       // Create Slack context for permission prompts (skip for autonomous agents)
       const slackContext = bypassPermissions ? undefined : {
@@ -452,11 +870,11 @@ export class SlackHandler {
               await this.app.client.chat.update({
                 channel,
                 ts: statusMessageTs,
-                text: `${prefix}⚙️ *Working...*`,
+                text: `${prefix}:gear: *Working...*`,
               });
             }
 
-            await this.updateMessageReaction(sessionKey, '⚙️');
+            await this.updateMessageReaction(sessionKey, 'gear');
 
             const todoTool = message.message.content?.find((part: any) =>
               part.type === 'tool_use' && part.name === 'TodoWrite'
@@ -466,12 +884,15 @@ export class SlackHandler {
               await this.handleTodoUpdate(todoTool.input, sessionKey, session?.sessionId, channel, replyTs, say);
             }
 
-            const toolContent = this.formatToolUse(message.message.content);
-            if (toolContent) {
-              await say({
-                text: `${prefix}${toolContent}`,
-                thread_ts: replyTs,
-              });
+            // In quiet mode, skip tool use messages
+            if (!quietMode) {
+              const toolContent = this.formatToolUse(message.message.content);
+              if (toolContent) {
+                await say({
+                  text: `${prefix}${toolContent}`,
+                  thread_ts: replyTs,
+                });
+              }
             }
           } else {
             const content = this.extractTextContent(message);
@@ -511,11 +932,11 @@ export class SlackHandler {
         await this.app.client.chat.update({
           channel,
           ts: statusMessageTs,
-          text: `${prefix}✅ *Task completed*`,
+          text: `${prefix}:white_check_mark: *Task completed*`,
         });
       }
 
-      await this.updateMessageReaction(sessionKey, '✅');
+      await this.updateMessageReaction(sessionKey, 'white_check_mark');
 
       this.logger.info('Completed processing message', {
         sessionKey,
@@ -533,11 +954,11 @@ export class SlackHandler {
           await this.app.client.chat.update({
             channel,
             ts: statusMessageTs,
-            text: `${prefix}❌ *Error occurred*`,
+            text: `${prefix}:x: *Error occurred*`,
           });
         }
 
-        await this.updateMessageReaction(sessionKey, '❌');
+        await this.updateMessageReaction(sessionKey, 'x');
 
         await say({
           text: `${prefix}Error: ${error.message || 'Something went wrong'}`,
@@ -550,11 +971,11 @@ export class SlackHandler {
           await this.app.client.chat.update({
             channel,
             ts: statusMessageTs,
-            text: `${prefix}⏹️ *Cancelled*`,
+            text: `${prefix}:stop_button: *Cancelled*`,
           });
         }
 
-        await this.updateMessageReaction(sessionKey, '⏹️');
+        await this.updateMessageReaction(sessionKey, 'stop_button');
       }
 
       if (processedFiles.length > 0) {
@@ -586,14 +1007,14 @@ export class SlackHandler {
 
   private formatToolUse(content: any[]): string {
     const parts: string[] = [];
-    
+
     for (const part of content) {
       if (part.type === 'text') {
         parts.push(part.text);
       } else if (part.type === 'tool_use') {
         const toolName = part.name;
         const input = part.input;
-        
+
         switch (toolName) {
           case 'Edit':
           case 'MultiEdit':
@@ -616,43 +1037,43 @@ export class SlackHandler {
         }
       }
     }
-    
+
     return parts.join('\n\n');
   }
 
   private formatEditTool(toolName: string, input: any): string {
     const filePath = input.file_path;
     const edits = toolName === 'MultiEdit' ? input.edits : [{ old_string: input.old_string, new_string: input.new_string }];
-    
-    let result = `📝 *Editing \`${filePath}\`*\n`;
-    
+
+    let result = `:pencil2: *Editing \`${filePath}\`*\n`;
+
     for (const edit of edits) {
       result += '\n```diff\n';
       result += `- ${this.truncateString(edit.old_string, 200)}\n`;
       result += `+ ${this.truncateString(edit.new_string, 200)}\n`;
       result += '```';
     }
-    
+
     return result;
   }
 
   private formatWriteTool(input: any): string {
     const filePath = input.file_path;
     const preview = this.truncateString(input.content, 300);
-    
-    return `📄 *Creating \`${filePath}\`*\n\`\`\`\n${preview}\n\`\`\``;
+
+    return `:page_facing_up: *Creating \`${filePath}\`*\n\`\`\`\n${preview}\n\`\`\``;
   }
 
   private formatReadTool(input: any): string {
-    return `👁️ *Reading \`${input.file_path}\`*`;
+    return `:eye: *Reading \`${input.file_path}\`*`;
   }
 
   private formatBashTool(input: any): string {
-    return `🖥️ *Running command:*\n\`\`\`bash\n${input.command}\n\`\`\``;
+    return `:desktop_computer: *Running command:*\n\`\`\`bash\n${input.command}\n\`\`\``;
   }
 
   private formatGenericTool(toolName: string, input: any): string {
-    return `🔧 *Using ${toolName}*`;
+    return `:wrench: *Using ${toolName}*`;
   }
 
   private truncateString(str: string, maxLength: number): string {
@@ -667,11 +1088,11 @@ export class SlackHandler {
   }
 
   private async handleTodoUpdate(
-    input: any, 
-    sessionKey: string, 
-    sessionId: string | undefined, 
-    channel: string, 
-    threadTs: string, 
+    input: any,
+    sessionKey: string,
+    sessionId: string | undefined,
+    channel: string,
+    threadTs: string,
     say: any
   ): Promise<void> {
     if (!sessionId || !input.todos) {
@@ -680,18 +1101,18 @@ export class SlackHandler {
 
     const newTodos: Todo[] = input.todos;
     const oldTodos = this.todoManager.getTodos(sessionId);
-    
+
     // Check if there's a significant change
     if (this.todoManager.hasSignificantChange(oldTodos, newTodos)) {
       // Update the todo manager
       this.todoManager.updateTodos(sessionId, newTodos);
-      
+
       // Format the todo list
       const todoList = this.todoManager.formatTodoList(newTodos);
-      
+
       // Check if we already have a todo message for this session
       const existingTodoMessageTs = this.todoMessages.get(sessionKey);
-      
+
       if (existingTodoMessageTs) {
         // Update existing todo message
         try {
@@ -715,7 +1136,7 @@ export class SlackHandler {
       const statusChange = this.todoManager.getStatusChange(oldTodos, newTodos);
       if (statusChange) {
         await say({
-          text: `🔄 *Task Update:*\n${statusChange}`,
+          text: `:arrows_counterclockwise: *Task Update:*\n${statusChange}`,
           thread_ts: threadTs,
         });
       }
@@ -726,17 +1147,17 @@ export class SlackHandler {
   }
 
   private async createNewTodoMessage(
-    todoList: string, 
-    channel: string, 
-    threadTs: string, 
-    sessionKey: string, 
+    todoList: string,
+    channel: string,
+    threadTs: string,
+    sessionKey: string,
     say: any
   ): Promise<void> {
     const result = await say({
       text: todoList,
       thread_ts: threadTs,
     });
-    
+
     if (result?.ts) {
       this.todoMessages.set(sessionKey, result.ts);
       this.logger.debug('Created new todo message', { sessionKey, messageTs: result.ts });
@@ -767,10 +1188,10 @@ export class SlackHandler {
           });
           this.logger.debug('Removed previous reaction', { sessionKey, emoji: currentEmoji });
         } catch (error) {
-          this.logger.debug('Failed to remove previous reaction (might not exist)', { 
-            sessionKey, 
+          this.logger.debug('Failed to remove previous reaction (might not exist)', {
+            sessionKey,
             emoji: currentEmoji,
-            error: (error as any).message 
+            error: (error as any).message
           });
         }
       }
@@ -785,12 +1206,12 @@ export class SlackHandler {
       // Track the current reaction
       this.currentReactions.set(sessionKey, emoji);
 
-      this.logger.debug('Updated message reaction', { 
-        sessionKey, 
-        emoji, 
+      this.logger.debug('Updated message reaction', {
+        sessionKey,
+        emoji,
         previousEmoji: currentEmoji,
-        channel: originalMessage.channel, 
-        ts: originalMessage.ts 
+        channel: originalMessage.channel,
+        ts: originalMessage.ts
       });
     } catch (error) {
       this.logger.warn('Failed to update message reaction', error);
@@ -808,11 +1229,11 @@ export class SlackHandler {
 
     let emoji: string;
     if (completed === total) {
-      emoji = '✅'; // All tasks completed
+      emoji = 'white_check_mark'; // All tasks completed
     } else if (inProgress > 0) {
-      emoji = '🔄'; // Tasks in progress
+      emoji = 'arrows_counterclockwise'; // Tasks in progress
     } else {
-      emoji = '📋'; // Tasks pending
+      emoji = 'clipboard'; // Tasks pending
     }
 
     await this.updateMessageReaction(sessionKey, emoji);
@@ -847,19 +1268,19 @@ export class SlackHandler {
       });
 
       const channelName = (channelInfo.channel as any)?.name || 'this channel';
-      
-      let welcomeMessage = `👋 Hi! I'm Claude Code, your AI coding assistant.\n\n`;
+
+      let welcomeMessage = `Hi! I'm Claude Code, your AI coding assistant.\n\n`;
       welcomeMessage += `To get started, I need to know the default working directory for #${channelName}.\n\n`;
-      
+
       if (config.baseDirectory) {
         welcomeMessage += `You can use:\n`;
-        welcomeMessage += `• \`cwd project-name\` (relative to base directory: \`${config.baseDirectory}\`)\n`;
-        welcomeMessage += `• \`cwd /absolute/path/to/project\` (absolute path)\n\n`;
+        welcomeMessage += `\`cwd project-name\` (relative to base directory: \`${config.baseDirectory}\`)\n`;
+        welcomeMessage += `\`cwd /absolute/path/to/project\` (absolute path)\n\n`;
       } else {
         welcomeMessage += `Please set it using:\n`;
-        welcomeMessage += `• \`cwd /path/to/project\` or \`set directory /path/to/project\`\n\n`;
+        welcomeMessage += `\`cwd /path/to/project\` or \`set directory /path/to/project\`\n\n`;
       }
-      
+
       welcomeMessage += `This will be the default working directory for this channel. `;
       welcomeMessage += `You can always override it for specific threads by mentioning me with a different \`cwd\` command.\n\n`;
       welcomeMessage += `Once set, you can ask me to help with code reviews, file analysis, debugging, and more!`;
@@ -929,12 +1350,12 @@ export class SlackHandler {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval granted', { approvalId });
-      
+
       permissionServer.resolveApproval(approvalId, true);
-      
+
       await respond({
         response_type: 'ephemeral',
-        text: '✅ Tool execution approved'
+        text: 'Tool execution approved'
       });
     });
 
@@ -943,12 +1364,12 @@ export class SlackHandler {
       await ack();
       const approvalId = (body as any).actions[0].value;
       this.logger.info('Tool approval denied', { approvalId });
-      
+
       permissionServer.resolveApproval(approvalId, false);
-      
+
       await respond({
         response_type: 'ephemeral',
-        text: '❌ Tool execution denied'
+        text: 'Tool execution denied'
       });
     });
 
