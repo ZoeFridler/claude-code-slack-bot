@@ -830,6 +830,33 @@ export class SlackHandler {
 
     let currentMessages: string[] = [];
     let statusMessageTs: string | undefined;
+    let heartbeatTimer: NodeJS.Timeout | undefined;
+    const startTime = Date.now();
+    let currentActivity = 'Thinking';
+    let currentToolName = '';
+
+    const formatElapsed = (ms: number): string => {
+      const seconds = Math.floor(ms / 1000);
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      const remaining = seconds % 60;
+      return `${minutes}m ${remaining}s`;
+    };
+
+    const updateStatusMessage = async () => {
+      if (!statusMessageTs) return;
+      const elapsed = formatElapsed(Date.now() - startTime);
+      const toolInfo = currentToolName ? ` — \`${currentToolName}\`` : '';
+      try {
+        await this.app.client.chat.update({
+          channel,
+          ts: statusMessageTs,
+          text: `${prefix}${currentActivity === 'Thinking' ? ':thinking_face:' : ':gear:'} *${currentActivity}...* (${elapsed})${toolInfo}`,
+        });
+      } catch (error) {
+        this.logger.debug('Failed to update heartbeat status', { error: (error as any).message });
+      }
+    };
 
     try {
       this.logger.info('Sending query to Claude Code SDK', {
@@ -841,10 +868,13 @@ export class SlackHandler {
 
       // Send initial status message
       const statusResult = await say({
-        text: `${prefix}:thinking_face: *Thinking...*`,
+        text: `${prefix}:thinking_face: *Thinking...* (0s)`,
         thread_ts: replyTs,
       });
       statusMessageTs = statusResult.ts;
+
+      // Start heartbeat timer — updates status every 5 seconds
+      heartbeatTimer = setInterval(() => updateStatusMessage(), 5000);
 
       // Add thinking reaction to original message
       await this.updateMessageReaction(sessionKey, 'thinking_face');
@@ -869,13 +899,10 @@ export class SlackHandler {
           const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
 
           if (hasToolUse) {
-            if (statusMessageTs) {
-              await this.app.client.chat.update({
-                channel,
-                ts: statusMessageTs,
-                text: `${prefix}:gear: *Working...*`,
-              });
-            }
+            // Extract tool name for status display
+            const toolPart = message.message.content?.find((part: any) => part.type === 'tool_use');
+            currentToolName = toolPart?.name || '';
+            currentActivity = 'Working';
 
             await this.updateMessageReaction(sessionKey, 'gear');
 
@@ -898,6 +925,8 @@ export class SlackHandler {
               }
             }
           } else {
+            currentActivity = 'Responding';
+            currentToolName = '';
             const content = this.extractTextContent(message);
             if (content) {
               currentMessages.push(content);
@@ -930,12 +959,16 @@ export class SlackHandler {
         }
       }
 
-      // Update status to completed
+      // Stop heartbeat
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+
+      // Update status to completed with total time
+      const totalElapsed = formatElapsed(Date.now() - startTime);
       if (statusMessageTs) {
         await this.app.client.chat.update({
           channel,
           ts: statusMessageTs,
-          text: `${prefix}:white_check_mark: *Task completed*`,
+          text: `${prefix}:white_check_mark: *Done* (${totalElapsed})`,
         });
       }
 
@@ -950,6 +983,10 @@ export class SlackHandler {
         await this.fileHandler.cleanupTempFiles(processedFiles);
       }
     } catch (error: any) {
+      // Stop heartbeat
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      const totalElapsed = formatElapsed(Date.now() - startTime);
+
       if (error.name !== 'AbortError') {
         this.logger.error('Error handling message', error);
 
@@ -957,7 +994,7 @@ export class SlackHandler {
           await this.app.client.chat.update({
             channel,
             ts: statusMessageTs,
-            text: `${prefix}:x: *Error occurred*`,
+            text: `${prefix}:x: *Error* (${totalElapsed})`,
           });
         }
 
@@ -974,7 +1011,7 @@ export class SlackHandler {
           await this.app.client.chat.update({
             channel,
             ts: statusMessageTs,
-            text: `${prefix}:stop_button: *Cancelled*`,
+            text: `${prefix}:stop_button: *Cancelled* (${totalElapsed})`,
           });
         }
 
@@ -985,6 +1022,7 @@ export class SlackHandler {
         await this.fileHandler.cleanupTempFiles(processedFiles);
       }
     } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
       this.activeControllers.delete(sessionKey);
 
       if (session?.sessionId) {
