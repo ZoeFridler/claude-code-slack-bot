@@ -16,6 +16,8 @@ export interface WorkingDirectoryConfig {
   setAt: Date;
 }
 
+export type AgentModel = 'opus' | 'sonnet';
+
 export interface AgentConfig {
   name: string;
   workingDirectory: string;
@@ -25,6 +27,7 @@ export interface AgentConfig {
   rules?: string;
   quietMode?: boolean;
   template?: string;
+  model?: AgentModel;
 }
 
 export type AgentStatus = 'idle' | 'processing' | 'error';
@@ -58,6 +61,7 @@ export interface ParsedCommand {
     | 'rename_agent'
     | 'agent_status'
     | 'quiet_mode'
+    | 'set_model'
     | 'agent_ask_agent'
     | 'schedule'
     | 'unschedule'

@@ -1,4 +1,4 @@
-import { AgentConfig, ParsedCommand, ScheduledTask, AgentTemplate } from './types';
+import { AgentConfig, AgentModel, ParsedCommand, ScheduledTask, AgentTemplate } from './types';
 import { Logger } from './logger';
 import { config } from './config';
 import * as path from 'path';
@@ -321,6 +321,18 @@ export class AgentManager {
     return { success: true };
   }
 
+  setModel(name: string, channelId: string, model: AgentModel): { success: boolean; error?: string } {
+    const key = this.getKey(name, channelId);
+    const agent = this.agents.get(key);
+    if (!agent) {
+      return { success: false, error: `Agent "${name}" not found in this channel.` };
+    }
+    agent.model = model;
+    this.save();
+    this.logger.info('Agent model updated', { name, channelId, model });
+    return { success: true };
+  }
+
   addSchedule(
     agentName: string,
     channelId: string,
@@ -439,6 +451,12 @@ export class AgentManager {
       return { type: 'quiet_mode', agentName: quietMatch[1], args: quietMatch[2].toLowerCase() };
     }
 
+    // model <name> opus|sonnet
+    const modelMatch = trimmed.match(/^model\s+(\S+)\s+(opus|sonnet)$/i);
+    if (modelMatch) {
+      return { type: 'set_model', agentName: modelMatch[1], args: modelMatch[2].toLowerCase() };
+    }
+
     // status <name>  or  agent status <name>
     const statusMatch = trimmed.match(/^(?:agent\s+)?status\s+(\S+)$/i);
     if (statusMatch) {
@@ -548,8 +566,9 @@ export class AgentManager {
       const statusEmoji = status === 'processing' ? ':gear:' : status === 'error' ? ':x:' : ':white_circle:';
       const quietLabel = agent.quietMode ? ' :mute:' : '';
       const templateLabel = agent.template ? ` [${agent.template}]` : '';
+      const modelLabel = agent.model === 'sonnet' ? ' :zap:sonnet' : agent.model === 'opus' ? ' :brain:opus' : '';
       const rulesPreview = agent.rules ? ` — _has rules_` : '';
-      message += `${statusEmoji} *${agent.name}*${templateLabel}${quietLabel} — \`${agent.workingDirectory}\`${rulesPreview} (by <@${agent.createdBy}>)\n`;
+      message += `${statusEmoji} *${agent.name}*${templateLabel}${modelLabel}${quietLabel} — \`${agent.workingDirectory}\`${rulesPreview} (by <@${agent.createdBy}>)\n`;
     }
     message += `\nUse \`@<name> <message>\` to talk to a specific agent, or \`@all <message>\` to broadcast.`;
     return message;
@@ -561,6 +580,7 @@ export class AgentManager {
     message += `- *Directory:* \`${agent.workingDirectory}\`\n`;
     message += `- *Created by:* <@${agent.createdBy}>\n`;
     message += `- *Created at:* ${agent.createdAt.toISOString()}\n`;
+    message += `- *Model:* ${agent.model || 'default'} ${agent.model === 'sonnet' ? '(fast)' : agent.model === 'opus' ? '(smart)' : ''}\n`;
     message += `- *Quiet mode:* ${agent.quietMode ? 'on' : 'off'}\n`;
     if (agent.template) {
       message += `- *Template:* ${agent.template}\n`;
@@ -611,7 +631,8 @@ export class AgentManager {
     msg += `*Agent Configuration*\n`;
     msg += `\`rules <agent> <text>\` — Set rules/system prompt\n`;
     msg += `\`clear rules <agent>\` — Remove rules\n`;
-    msg += `\`quiet <agent> on|off\` — Toggle quiet mode (suppress tool messages)\n`;
+    msg += `\`quiet <agent> on|off\` — Toggle quiet mode (suppress tool messages)\n` +
+    `\`model <agent> opus|sonnet\` — Set model (opus = smart, sonnet = fast)\n`;
     msg += `\`status <agent>\` — Show agent details and status\n\n`;
     msg += `*Messaging*\n`;
     msg += `\`@<agent> <message>\` — Send a message to an agent\n`;

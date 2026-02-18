@@ -101,8 +101,17 @@ export class SlackHandler {
         messagePrefix: `[${task.agentName}]`,
         bypassPermissions: true,
         quietMode: agent.quietMode,
+        model: this.resolveModel(agent.model),
       });
     });
+  }
+
+  private resolveModel(model?: string): string | undefined {
+    switch (model) {
+      case 'sonnet': return 'claude-sonnet-4-5-20250929';
+      case 'opus': return 'claude-opus-4-6';
+      default: return undefined; // use SDK default
+    }
   }
 
   private buildIdentityPrompt(agent: { name: string; workingDirectory: string; rules?: string }): string {
@@ -238,6 +247,9 @@ export class SlackHandler {
           return;
         case 'quiet_mode':
           await this.handleQuietMode(parsed.agentName!, parsed.args! === 'on', channel, thread_ts || ts, say);
+          return;
+        case 'set_model':
+          await this.handleSetModel(parsed.agentName!, parsed.args! as any, channel, thread_ts || ts, say);
           return;
         case 'agent_status':
           await this.handleAgentStatus(parsed.agentName!, channel, thread_ts || ts, say);
@@ -509,6 +521,28 @@ export class SlackHandler {
     }
   }
 
+  private async handleSetModel(
+    agentName: string,
+    model: 'opus' | 'sonnet',
+    channel: string,
+    threadTs: string,
+    say: any
+  ): Promise<void> {
+    const result = this.agentManager.setModel(agentName, channel, model);
+    if (result.success) {
+      const label = model === 'sonnet' ? 'Sonnet (fast)' : 'Opus (smart)';
+      await say({
+        text: `Model set to *${label}* for *${agentName}*.`,
+        thread_ts: threadTs,
+      });
+    } else {
+      await say({
+        text: `${result.error}`,
+        thread_ts: threadTs,
+      });
+    }
+  }
+
   private async handleAgentStatus(
     agentName: string,
     channel: string,
@@ -651,6 +685,7 @@ export class SlackHandler {
         messagePrefix: `[${agentName}]`,
         bypassPermissions: true,
         quietMode: agent.quietMode,
+        model: this.resolveModel(agent.model),
       });
       this.agentStatuses.set(agentKey, 'idle');
     } catch (error) {
@@ -810,8 +845,9 @@ export class SlackHandler {
     messagePrefix?: string;
     bypassPermissions?: boolean;
     quietMode?: boolean;
+    model?: string;
   }): Promise<void> {
-    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix, bypassPermissions, quietMode } = opts;
+    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix, bypassPermissions, quietMode, model } = opts;
     const replyTs = threadTs || ts;
     const prefix = messagePrefix ? `${messagePrefix} ` : '';
 
@@ -886,7 +922,7 @@ export class SlackHandler {
         user
       };
 
-      for await (const message of this.claudeHandler.streamQuery(prompt, session, abortController, workingDirectory, slackContext)) {
+      for await (const message of this.claudeHandler.streamQuery(prompt, session, abortController, workingDirectory, slackContext, model)) {
         if (abortController.signal.aborted) break;
 
         this.logger.debug('Received message from Claude SDK', {
