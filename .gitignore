@@ -38,3 +38,4 @@ coverage/
 .nyc_output/
 agents.json
 schedules.json
+sessions.json

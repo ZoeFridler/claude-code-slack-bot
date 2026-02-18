@@ -2,6 +2,10 @@ import { query, type SDKMessage } from '@anthropic-ai/claude-code';
 import { ConversationSession } from './types';
 import { Logger } from './logger';
 import { McpManager, McpServerConfig } from './mcp-manager';
+import * as path from 'path';
+import * as fs from 'fs';
+
+const SESSIONS_FILE = path.join(__dirname, '..', 'sessions.json');
 
 export class ClaudeHandler {
   private sessions: Map<string, ConversationSession> = new Map();
@@ -10,6 +14,52 @@ export class ClaudeHandler {
 
   constructor(mcpManager: McpManager) {
     this.mcpManager = mcpManager;
+    this.loadSessions();
+  }
+
+  private saveSessions(): void {
+    try {
+      const data: Record<string, any> = {};
+      for (const [key, session] of this.sessions.entries()) {
+        if (session.sessionId) {
+          data[key] = {
+            userId: session.userId,
+            channelId: session.channelId,
+            threadTs: session.threadTs,
+            sessionId: session.sessionId,
+            isActive: session.isActive,
+            lastActivity: session.lastActivity.toISOString(),
+            workingDirectory: session.workingDirectory,
+          };
+        }
+      }
+      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
+      this.logger.debug('Saved sessions to disk', { count: Object.keys(data).length });
+    } catch (error) {
+      this.logger.error('Failed to save sessions to disk', error);
+    }
+  }
+
+  private loadSessions(): void {
+    try {
+      if (!fs.existsSync(SESSIONS_FILE)) return;
+      const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
+      const data: Record<string, any> = JSON.parse(raw);
+      for (const [key, s] of Object.entries(data)) {
+        this.sessions.set(key, {
+          userId: s.userId,
+          channelId: s.channelId,
+          threadTs: s.threadTs,
+          sessionId: s.sessionId,
+          isActive: s.isActive,
+          lastActivity: new Date(s.lastActivity),
+          workingDirectory: s.workingDirectory,
+        });
+      }
+      this.logger.info('Loaded sessions from disk', { count: this.sessions.size });
+    } catch (error) {
+      this.logger.error('Failed to load sessions from disk', error);
+    }
   }
 
   getSessionKey(userId: string, channelId: string, threadTs?: string): string {
@@ -135,7 +185,9 @@ export class ClaudeHandler {
         if (message.type === 'system' && message.subtype === 'init') {
           if (session) {
             session.sessionId = message.session_id;
-            this.logger.info('Session initialized', { 
+            session.lastActivity = new Date();
+            this.saveSessions();
+            this.logger.info('Session initialized', {
               sessionId: message.session_id,
               model: (message as any).model,
               tools: (message as any).tools?.length || 0,
@@ -160,6 +212,7 @@ export class ClaudeHandler {
       }
     }
     if (cleaned > 0) {
+      this.saveSessions();
       this.logger.info(`Cleaned up ${cleaned} inactive sessions`);
     }
   }
