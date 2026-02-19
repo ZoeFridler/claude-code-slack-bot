@@ -106,11 +106,10 @@ export class SlackHandler {
     });
   }
 
-  private resolveModel(model?: string): string | undefined {
+  private resolveModel(model?: string): string {
     switch (model) {
       case 'sonnet': return 'claude-sonnet-4-5-20250929';
-      case 'opus': return 'claude-opus-4-6';
-      default: return undefined; // use SDK default
+      default: return 'claude-opus-4-6';
     }
   }
 
