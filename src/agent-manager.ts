@@ -724,6 +724,26 @@ export class AgentManager {
       return { type: 'list_schedules' };
     }
 
+    // Agent name at start of message: "lina do that", "lina what files are here"
+    for (const agent of agents) {
+      const namePattern = new RegExp(`^${agent.name}[,:]?\\s+(.+)$`, 'is');
+      const match = text.match(namePattern);
+      if (match) {
+        return { type: 'agent_message', agentName: agent.name, args: match[1].trim() };
+      }
+    }
+
+    // Agent name anywhere: "tell lina to ...", "ask lina about ..."
+    if (/\b(tell|ask)\b/i.test(text)) {
+      const agent = findAgent();
+      if (agent) {
+        const msgMatch = text.match(/(?:tell|ask)\s+\S+\s+(?:to|about|if|whether|that)?\s*(.+)$/is);
+        if (msgMatch) {
+          return { type: 'agent_message', agentName: agent, args: msgMatch[1].trim() };
+        }
+      }
+    }
+
     return { type: 'none' };
   }
 
