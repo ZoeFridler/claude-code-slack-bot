@@ -503,6 +503,16 @@ export class AgentManager {
       return { type: 'list_agents' };
     }
 
+    // collab @<agent1> @<agent2> <task>
+    const collabMatch = trimmed.match(/^collab\s+@(\S+)\s+@(\S+)\s+(.+)$/is);
+    if (collabMatch) {
+      const agent1 = collabMatch[1];
+      const agent2 = collabMatch[2];
+      if (this.getAgent(agent1, channelId) && this.getAgent(agent2, channelId)) {
+        return { type: 'collaborate', agentName: agent1, targetAgent: agent2, args: collabMatch[3].trim() };
+      }
+    }
+
     // @all <message>
     const broadcastMatch = trimmed.match(/^@all\s+(.+)$/is);
     if (broadcastMatch) {
@@ -637,7 +647,8 @@ export class AgentManager {
     msg += `*Messaging*\n`;
     msg += `\`@<agent> <message>\` — Send a message to an agent\n`;
     msg += `\`@all <message>\` — Broadcast to all agents\n`;
-    msg += `\`@<agent1> ask @<agent2> <question>\` — Agent-to-agent query\n\n`;
+    msg += `\`@<agent1> ask @<agent2> <question>\` — Agent-to-agent query\n` +
+    `\`collab @<agent1> @<agent2> <task>\` — Multi-turn collaboration between agents\n\n`;
     msg += `*Scheduled Tasks*\n`;
     msg += `\`schedule <agent> every <N> <min|hours|days> <message>\` — Schedule a recurring task\n`;
     msg += `\`unschedule <id>\` — Remove a scheduled task\n`;

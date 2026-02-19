@@ -271,6 +271,9 @@ export class SlackHandler {
         case 'help':
           await say({ text: this.agentManager.formatHelp(), ...(thread_ts ? { thread_ts } : {}) });
           return;
+        case 'collaborate':
+          await this.handleCollaboration(parsed.agentName!, parsed.targetAgent!, parsed.args!, channel, user, thread_ts, ts, say);
+          return;
         case 'agent_message':
           await this.handleAgentMessage(parsed.agentName!, parsed.args!, channel, user, thread_ts, ts, say, processedFiles);
           return;
@@ -793,6 +796,135 @@ export class SlackHandler {
       say,
       processedFiles
     );
+  }
+
+  private async queryAgentSilent(
+    agentName: string,
+    prompt: string,
+    channel: string,
+    threadKey: string,
+  ): Promise<string> {
+    const agent = this.agentManager.getAgent(agentName, channel);
+    if (!agent) throw new Error(`Agent "${agentName}" not found`);
+
+    const sessionKey = this.claudeHandler.getAgentSessionKey(agentName, channel, threadKey);
+    let session = this.claudeHandler.getAgentSession(agentName, channel, threadKey);
+    if (!session) {
+      session = this.claudeHandler.createAgentSession(agentName, channel, threadKey);
+    }
+
+    const fullPrompt = `${this.buildIdentityPrompt(agent)}\n\n${prompt}`;
+    const agentKey = `${channel}:${agentName}`;
+    this.agentStatuses.set(agentKey, 'processing');
+
+    let response = '';
+    try {
+      const abortController = new AbortController();
+      const model = this.resolveModel(agent.model);
+      for await (const message of this.claudeHandler.streamQuery(
+        fullPrompt, session, abortController, agent.workingDirectory, undefined, model
+      )) {
+        if (message.type === 'assistant') {
+          const hasToolUse = message.message.content?.some((part: any) => part.type === 'tool_use');
+          if (!hasToolUse) {
+            const textParts = message.message.content
+              ?.filter((part: any) => part.type === 'text')
+              .map((part: any) => part.text);
+            if (textParts?.length) response += textParts.join('');
+          }
+        } else if (message.type === 'result' && message.subtype === 'success') {
+          const result = (message as any).result;
+          if (result && !response.includes(result)) response = result;
+        }
+      }
+      this.agentStatuses.set(agentKey, 'idle');
+    } catch (error) {
+      this.agentStatuses.set(agentKey, 'error');
+      throw error;
+    }
+    return response;
+  }
+
+  private async handleCollaboration(
+    agent1Name: string,
+    agent2Name: string,
+    task: string,
+    channel: string,
+    user: string,
+    threadTs: string | undefined,
+    ts: string,
+    say: any
+  ): Promise<void> {
+    const agent1 = this.agentManager.getAgent(agent1Name, channel);
+    const agent2 = this.agentManager.getAgent(agent2Name, channel);
+
+    if (!agent1 || !agent2) {
+      const missing = !agent1 ? agent1Name : agent2Name;
+      await say({
+        text: `Agent "${missing}" not found in this channel.`,
+        thread_ts: threadTs || ts,
+      });
+      return;
+    }
+
+    const maxTurns = 10;
+    const replyTs = threadTs || ts;
+    const collabKey = `collab-${ts}`;
+
+    await say({
+      text: `:handshake: *Collaboration started* between *${agent1Name}* and *${agent2Name}*\nTask: "${task}"\n_Max ${maxTurns} turns. Agents will signal when done._`,
+      thread_ts: replyTs,
+    });
+
+    // Agent 1 starts by working on the task
+    let lastMessage = `You are collaborating with ${agent2Name} on this task: "${task}"\n\nYou go first. Analyze the task, do any work needed, and then write a message to ${agent2Name} explaining what you did and what they should do next. When the task is fully complete, include the word DONE in your response.`;
+
+    let currentAgent = agent1Name;
+    let otherAgent = agent2Name;
+
+    for (let turn = 1; turn <= maxTurns; turn++) {
+      await say({
+        text: `:speech_balloon: *Turn ${turn}/${maxTurns}* — *${currentAgent}* is working...`,
+        thread_ts: replyTs,
+      });
+
+      let response: string;
+      try {
+        response = await this.queryAgentSilent(currentAgent, lastMessage, channel, collabKey);
+      } catch (error) {
+        await say({
+          text: `[${currentAgent}] Error: ${(error as any).message || 'Failed to respond'}`,
+          thread_ts: replyTs,
+        });
+        break;
+      }
+
+      // Post the agent's response
+      await say({
+        text: `[${currentAgent}] ${this.formatMessage(response, true)}`,
+        thread_ts: replyTs,
+      });
+
+      // Check if the agent signaled completion
+      if (/\bDONE\b/.test(response)) {
+        await say({
+          text: `:white_check_mark: *Collaboration complete* after ${turn} turn(s).`,
+          thread_ts: replyTs,
+        });
+        return;
+      }
+
+      // Prepare the next agent's prompt with the previous agent's response
+      lastMessage = `You are collaborating with ${currentAgent} on this task: "${task}"\n\nHere's what ${currentAgent} just said/did:\n\n${response}\n\nNow it's your turn. Continue the work, respond to ${currentAgent}, and do what's needed. When the task is fully complete, include the word DONE in your response.`;
+
+      // Swap agents
+      [currentAgent, otherAgent] = [otherAgent, currentAgent];
+    }
+
+    await say({
+      text: `:warning: *Collaboration ended* — reached ${maxTurns} turn limit. You can continue with another \`collab\` command.`,
+      thread_ts: replyTs,
+    });
   }
 
   private async handleBroadcast(

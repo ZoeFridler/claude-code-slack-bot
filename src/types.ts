@@ -63,6 +63,7 @@ export interface ParsedCommand {
     | 'quiet_mode'
     | 'set_model'
     | 'agent_ask_agent'
+    | 'collaborate'
     | 'schedule'
     | 'unschedule'
     | 'list_schedules'
