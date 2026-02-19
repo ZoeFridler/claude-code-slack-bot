@@ -42,6 +42,7 @@ export class SlackHandler {
   private originalMessages: Map<string, { channel: string; ts: string }> = new Map(); // sessionKey -> original message info
   private currentReactions: Map<string, string> = new Map(); // sessionKey -> current emoji
   private agentStatuses: Map<string, AgentStatus> = new Map(); // agentKey -> status
+  private pendingRemovals: Map<string, { agentName: string; channel: string; threadTs: string; expiresAt: number }> = new Map();
   private botUserId: string | null = null;
 
   constructor(app: App, claudeHandler: ClaudeHandler, mcpManager: McpManager) {
@@ -145,6 +146,15 @@ export class SlackHandler {
 
     // If no text and no files, nothing to process
     if (!text && processedFiles.length === 0) return;
+
+    // Check for pending removal confirmations
+    if (text && this.tryConfirmRemoval(text, channel)) {
+      await say({
+        text: `:wastebasket: Agent removed.`,
+        thread_ts: thread_ts || ts,
+      });
+      return;
+    }
 
     this.logger.debug('Received message from Slack', {
       user,
@@ -436,19 +446,50 @@ export class SlackHandler {
     threadTs: string,
     say: any
   ): Promise<void> {
-    const result = this.agentManager.removeAgent(agentName, channel);
-    if (result.success) {
-      this.agentStatuses.delete(`${channel}:${agentName}`);
+    const agent = this.agentManager.getAgent(agentName, channel);
+    if (!agent) {
       await say({
-        text: `Agent *${agentName}* removed.`,
+        text: `Agent "${agentName}" not found in this channel.`,
         thread_ts: threadTs,
       });
-    } else {
-      await say({
-        text: `${result.error}`,
-        thread_ts: threadTs,
-      });
+      return;
     }
+
+    // Require confirmation — store pending removal
+    const confirmKey = `${channel}:${agentName}`;
+    this.pendingRemovals.set(confirmKey, {
+      agentName,
+      channel,
+      threadTs,
+      expiresAt: Date.now() + 30_000, // 30 seconds to confirm
+    });
+
+    await say({
+      text: `:warning: Are you sure you want to remove agent *${agentName}*? This will delete all its configuration and session history.\n\nType \`yes\` or \`confirm\` within 30 seconds to proceed.`,
+      thread_ts: threadTs,
+    });
+  }
+
+  private tryConfirmRemoval(text: string, channel: string): boolean {
+    if (!/^(yes|confirm|y)$/i.test(text.trim())) return false;
+
+    // Check all pending removals for this channel
+    for (const [key, pending] of this.pendingRemovals.entries()) {
+      if (pending.channel === channel) {
+        if (Date.now() > pending.expiresAt) {
+          this.pendingRemovals.delete(key);
+          return false;
+        }
+        // Execute the removal
+        const result = this.agentManager.removeAgent(pending.agentName, pending.channel);
+        this.pendingRemovals.delete(key);
+        if (result.success) {
+          this.agentStatuses.delete(key);
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private async handleRenameAgent(

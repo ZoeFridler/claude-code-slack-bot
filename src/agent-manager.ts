@@ -642,6 +642,27 @@ export class AgentManager {
       return undefined;
     };
 
+    // PRIORITY 1: If message starts with an agent name, it's a message TO that agent.
+    // This MUST come first to prevent "lina ... remove comments" from being parsed as "remove agent lina".
+    for (const agent of agents) {
+      const namePattern = new RegExp(`^${agent.name}[,:]?\\s+(.+)$`, 'is');
+      const match = text.match(namePattern);
+      if (match) {
+        return { type: 'agent_message', agentName: agent.name, args: match[1].trim() };
+      }
+    }
+
+    // PRIORITY 2: "tell lina to ...", "ask lina about ..."
+    if (/\b(tell|ask)\b/i.test(text)) {
+      const agent = findAgent();
+      if (agent) {
+        const msgMatch = text.match(/(?:tell|ask)\s+\S+\s+(?:to|about|if|whether|that)?\s*(.+)$/is);
+        if (msgMatch) {
+          return { type: 'agent_message', agentName: agent, args: msgMatch[1].trim() };
+        }
+      }
+    }
+
     // Global rules: "add a global rule ...", "make a rule for all agents ...", "all agents should ..."
     if (/\bglobal\s+rule|rule.*(all\s+agents|every\s+agent)|all\s+agents?\s+should|add\s+.*rule\s+.*(?:all|every|global)/i.test(text)) {
       // Extract the rule text — everything after the intent keywords
@@ -666,7 +687,7 @@ export class AgentManager {
     if (/\brule/i.test(text)) {
       const agent = findAgent();
       if (agent) {
-        if (/\b(clear|remove|delete)\b/i.test(text)) {
+        if (/\b(clear|remove|delete)\b.*\brules?\b/i.test(text)) {
           return { type: 'clear_rules', agentName: agent };
         }
         const ruleMatch = text.match(/(?:rule[s]?\s*(?:that|to|:)?\s*|should\s+)(.+)$/is);
@@ -684,8 +705,8 @@ export class AgentManager {
       }
     }
 
-    // Remove agent: "delete agent X", "remove lina"
-    if (/\b(remove|delete|destroy)\b/i.test(text)) {
+    // Remove agent: MUST include "agent" near "remove/delete" — e.g. "remove agent lina", "delete the agent lina"
+    if (/\b(remove|delete|destroy)\b.*\bagent\b/i.test(text) || /\bagent\b.*\b(remove|delete|destroy)\b/i.test(text)) {
       const agent = findAgent();
       if (agent) {
         return { type: 'remove_agent', agentName: agent };
@@ -746,26 +767,6 @@ export class AgentManager {
     // Schedules: "show schedules", "what's scheduled"
     if (/\b(show|list|what)\b.*\bschedule/i.test(text)) {
       return { type: 'list_schedules' };
-    }
-
-    // Agent name at start of message: "lina do that", "lina what files are here"
-    for (const agent of agents) {
-      const namePattern = new RegExp(`^${agent.name}[,:]?\\s+(.+)$`, 'is');
-      const match = text.match(namePattern);
-      if (match) {
-        return { type: 'agent_message', agentName: agent.name, args: match[1].trim() };
-      }
-    }
-
-    // Agent name anywhere: "tell lina to ...", "ask lina about ..."
-    if (/\b(tell|ask)\b/i.test(text)) {
-      const agent = findAgent();
-      if (agent) {
-        const msgMatch = text.match(/(?:tell|ask)\s+\S+\s+(?:to|about|if|whether|that)?\s*(.+)$/is);
-        if (msgMatch) {
-          return { type: 'agent_message', agentName: agent, args: msgMatch[1].trim() };
-        }
-      }
     }
 
     return { type: 'none' };
