@@ -113,17 +113,8 @@ export class FileHandler {
         if (file.isImage) {
           prompt += `\n## Image: ${file.name}\n`;
           prompt += `File type: ${file.mimetype}\n`;
-          // Embed image as base64 directly in prompt so it doesn't persist in session history.
-          // Do NOT tell Claude to use the Read tool on images — that embeds image data in the
-          // session, which corrupts it on resume when the API can't reprocess stale images.
-          try {
-            const imageBuffer = fs.readFileSync(file.path);
-            const base64 = imageBuffer.toString('base64');
-            prompt += `Image data (base64, ${file.mimetype}):\n`;
-            prompt += `![${file.name}](data:${file.mimetype};base64,${base64})\n`;
-          } catch (error) {
-            prompt += `Note: Could not read image file. Path was: ${file.path}\n`;
-          }
+          prompt += `Path: ${file.path}\n`;
+          prompt += `Note: This is an image file that has been uploaded. You can analyze it using the Read tool to examine the image content.\n`;
         } else if (file.isText) {
           prompt += `\n## File: ${file.name}\n`;
           prompt += `File type: ${file.mimetype}\n`;
