@@ -645,6 +645,11 @@ export class AgentManager {
     // PRIORITY 1: If message starts with an agent name, it's a message TO that agent.
     // This MUST come first to prevent "lina ... remove comments" from being parsed as "remove agent lina".
     for (const agent of agents) {
+      // Just the agent name (e.g. "lina" with a file attachment, no additional text)
+      if (lower.trim() === agent.name.toLowerCase()) {
+        return { type: 'agent_message', agentName: agent.name, args: '' };
+      }
+      // Agent name followed by a message
       const namePattern = new RegExp(`^${agent.name}[,:]?\\s+(.+)$`, 'is');
       const match = text.match(namePattern);
       if (match) {
