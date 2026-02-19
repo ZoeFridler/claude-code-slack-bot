@@ -6,6 +6,7 @@ import * as fs from 'fs';
 
 const AGENTS_FILE = path.join(__dirname, '..', 'agents.json');
 const SCHEDULES_FILE = path.join(__dirname, '..', 'schedules.json');
+const GLOBAL_RULES_FILE = path.join(__dirname, '..', 'global-rules.json');
 
 const TEMPLATES: AgentTemplate[] = [
   {
@@ -69,12 +70,14 @@ export class AgentManager {
   private agents: Map<string, AgentConfig> = new Map();
   private schedules: Map<string, ScheduledTask> = new Map();
   private scheduleTimers: Map<string, NodeJS.Timeout> = new Map();
+  private globalRules: Map<string, string> = new Map(); // channelId -> rules
   private logger = new Logger('AgentManager');
   private scheduleCallback?: (task: ScheduledTask) => Promise<void>;
 
   constructor() {
     this.load();
     this.loadSchedules();
+    this.loadGlobalRules();
   }
 
   setScheduleCallback(callback: (task: ScheduledTask) => Promise<void>): void {
@@ -142,6 +145,33 @@ export class AgentManager {
       this.logger.info('Loaded schedules from disk', { count: this.schedules.size });
     } catch (error) {
       this.logger.error('Failed to load schedules from disk', error);
+    }
+  }
+
+  private saveGlobalRules(): void {
+    try {
+      const data: Record<string, string> = {};
+      for (const [key, rules] of this.globalRules.entries()) {
+        data[key] = rules;
+      }
+      fs.writeFileSync(GLOBAL_RULES_FILE, JSON.stringify(data, null, 2));
+      this.logger.debug('Saved global rules to disk');
+    } catch (error) {
+      this.logger.error('Failed to save global rules to disk', error);
+    }
+  }
+
+  private loadGlobalRules(): void {
+    try {
+      if (!fs.existsSync(GLOBAL_RULES_FILE)) return;
+      const raw = fs.readFileSync(GLOBAL_RULES_FILE, 'utf-8');
+      const data: Record<string, string> = JSON.parse(raw);
+      for (const [key, rules] of Object.entries(data)) {
+        this.globalRules.set(key, rules);
+      }
+      this.logger.info('Loaded global rules from disk', { count: this.globalRules.size });
+    } catch (error) {
+      this.logger.error('Failed to load global rules from disk', error);
     }
   }
 
@@ -333,6 +363,22 @@ export class AgentManager {
     return { success: true };
   }
 
+  setGlobalRules(channelId: string, rules: string): void {
+    this.globalRules.set(channelId, rules);
+    this.saveGlobalRules();
+    this.logger.info('Global rules updated', { channelId });
+  }
+
+  clearGlobalRules(channelId: string): void {
+    this.globalRules.delete(channelId);
+    this.saveGlobalRules();
+    this.logger.info('Global rules cleared', { channelId });
+  }
+
+  getGlobalRules(channelId: string): string | undefined {
+    return this.globalRules.get(channelId);
+  }
+
   addSchedule(
     agentName: string,
     channelId: string,
@@ -428,6 +474,22 @@ export class AgentManager {
     const renameMatch = trimmed.match(/^rename\s+agent\s+(\S+)\s+to\s+(\S+)$/i);
     if (renameMatch) {
       return { type: 'rename_agent', agentName: renameMatch[1], args: renameMatch[2] };
+    }
+
+    // global rules <text>
+    const globalRulesMatch = trimmed.match(/^global\s+rules\s+(.+)$/is);
+    if (globalRulesMatch) {
+      return { type: 'set_global_rules', args: globalRulesMatch[1].trim() };
+    }
+
+    // clear global rules
+    if (/^clear\s+global\s+rules$/i.test(trimmed)) {
+      return { type: 'clear_global_rules' };
+    }
+
+    // show global rules
+    if (/^(show\s+)?global\s+rules$/i.test(trimmed)) {
+      return { type: 'show_global_rules' };
     }
 
     // set rules <name> <rules...>  or  rules <name> <rules...>
@@ -639,8 +701,11 @@ export class AgentManager {
     msg += `\`rename agent <old> to <new>\` — Rename an agent\n`;
     msg += `\`list agents\` — List all agents in this channel\n\n`;
     msg += `*Agent Configuration*\n`;
-    msg += `\`rules <agent> <text>\` — Set rules/system prompt\n`;
-    msg += `\`clear rules <agent>\` — Remove rules\n`;
+    msg += `\`global rules <text>\` — Set rules for ALL agents\n`;
+    msg += `\`clear global rules\` — Remove global rules\n`;
+    msg += `\`show global rules\` — Show current global rules\n`;
+    msg += `\`rules <agent> <text>\` — Set rules for a specific agent\n`;
+    msg += `\`clear rules <agent>\` — Remove agent rules\n`;
     msg += `\`quiet <agent> on|off\` — Toggle quiet mode (suppress tool messages)\n` +
     `\`model <agent> opus|sonnet\` — Set model (opus = smart, sonnet = fast)\n`;
     msg += `\`status <agent>\` — Show agent details and status\n\n`;

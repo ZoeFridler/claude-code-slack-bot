@@ -113,10 +113,14 @@ export class SlackHandler {
     }
   }
 
-  private buildIdentityPrompt(agent: { name: string; workingDirectory: string; rules?: string }): string {
+  private buildIdentityPrompt(agent: { name: string; workingDirectory: string; channelId: string; rules?: string }): string {
     let prompt = `You are "${agent.name}", working on ${agent.workingDirectory}. Prefix responses with [${agent.name}]. Use claude-flow MCP memory tools to communicate with other agents.`;
+    const globalRules = this.agentManager.getGlobalRules(agent.channelId);
+    if (globalRules) {
+      prompt += `\n\nGlobal rules (apply to ALL agents):\n${globalRules}`;
+    }
     if (agent.rules) {
-      prompt += `\n\nYour rules:\n${agent.rules}`;
+      prompt += `\n\nYour specific rules:\n${agent.rules}`;
     }
     return prompt;
   }
@@ -238,6 +242,19 @@ export class SlackHandler {
         case 'list_agents':
           await this.handleListAgents(channel, thread_ts || ts, say);
           return;
+        case 'set_global_rules':
+          this.agentManager.setGlobalRules(channel, parsed.args!);
+          await say({ text: `Global rules updated:\n\`\`\`\n${parsed.args}\n\`\`\`\nThese apply to *all* agents in this channel.`, thread_ts: thread_ts || ts });
+          return;
+        case 'clear_global_rules':
+          this.agentManager.clearGlobalRules(channel);
+          await say({ text: `Global rules cleared.`, thread_ts: thread_ts || ts });
+          return;
+        case 'show_global_rules': {
+          const rules = this.agentManager.getGlobalRules(channel);
+          await say({ text: rules ? `*Global rules:*\n\`\`\`\n${rules}\n\`\`\`` : 'No global rules set. Use `global rules <text>` to add them.', thread_ts: thread_ts || ts });
+          return;
+        }
         case 'set_rules':
           await this.handleSetRules(parsed.agentName!, parsed.args!, channel, thread_ts || ts, say);
           return;
