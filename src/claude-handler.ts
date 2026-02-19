@@ -201,7 +201,42 @@ export class ClaudeHandler {
         }
         yield message;
       }
-    } catch (error) {
+    } catch (error: any) {
+      const errorMsg = error?.message || String(error);
+      const isSessionCorrupted = options.resume && (
+        errorMsg.includes('Could not process image') ||
+        errorMsg.includes('invalid_request_error')
+      );
+
+      if (isSessionCorrupted && session) {
+        this.logger.warn('Session has corrupted data, retrying with fresh session', {
+          oldSessionId: session.sessionId,
+          error: errorMsg,
+        });
+
+        // Clear the corrupted session and retry fresh
+        session.sessionId = undefined;
+        delete options.resume;
+        this.saveSessions();
+
+        for await (const message of query({
+          prompt,
+          abortController: abortController || new AbortController(),
+          options,
+        })) {
+          if (message.type === 'system' && message.subtype === 'init') {
+            session.sessionId = message.session_id;
+            session.lastActivity = new Date();
+            this.saveSessions();
+            this.logger.info('Session re-initialized after corruption recovery', {
+              sessionId: message.session_id,
+            });
+          }
+          yield message;
+        }
+        return;
+      }
+
       this.logger.error('Error in Claude query', error);
       throw error;
     }
