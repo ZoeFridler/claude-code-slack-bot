@@ -1147,9 +1147,23 @@ export class SlackHandler {
 
             // In quiet mode, skip tool use messages
             if (!quietMode) {
-              const toolContent = this.formatToolUse(message.message.content);
-              if (toolContent) {
-                await colorSay(`${prefix}${toolContent}`, replyTs);
+              const toolOutput = this.formatToolUseRich(message.message.content);
+              if (toolOutput) {
+                if (toolOutput.attachments && toolOutput.attachments.length > 0) {
+                  // Rich formatted output with colored attachments
+                  const headerText = toolOutput.text ? `${prefix}${toolOutput.text}` : undefined;
+                  await say({
+                    ...(headerText ? { text: headerText } : {}),
+                    attachments: toolOutput.attachments.map(a => ({
+                      color: a.color,
+                      text: a.text,
+                      mrkdwn_in: ['text'] as string[],
+                    })),
+                    thread_ts: replyTs,
+                  });
+                } else if (toolOutput.text) {
+                  await colorSay(`${prefix}${toolOutput.text}`, replyTs);
+                }
               }
             }
           } else {
@@ -1268,12 +1282,13 @@ export class SlackHandler {
     return null;
   }
 
-  private formatToolUse(content: any[]): string {
-    const parts: string[] = [];
+  private formatToolUseRich(content: any[]): { text?: string; attachments?: Array<{ color: string; text: string }> } | null {
+    let headerParts: string[] = [];
+    let attachments: Array<{ color: string; text: string }> = [];
 
     for (const part of content) {
       if (part.type === 'text') {
-        parts.push(part.text);
+        headerParts.push(part.text);
       } else if (part.type === 'tool_use') {
         const toolName = part.name;
         const input = part.input;
@@ -1281,62 +1296,78 @@ export class SlackHandler {
         switch (toolName) {
           case 'Edit':
           case 'MultiEdit':
-            parts.push(this.formatEditTool(toolName, input));
+            this.formatEditToolRich(toolName, input, headerParts, attachments);
             break;
           case 'Write':
-            parts.push(this.formatWriteTool(input));
+            this.formatWriteToolRich(input, headerParts, attachments);
             break;
           case 'Read':
-            parts.push(this.formatReadTool(input));
+            headerParts.push(`:eye: *Reading \`${input.file_path}\`*`);
             break;
           case 'Bash':
-            parts.push(this.formatBashTool(input));
+            this.formatBashToolRich(input, headerParts, attachments);
             break;
           case 'TodoWrite':
-            // Handle TodoWrite separately - don't include in regular tool output
-            return this.handleTodoWrite(input);
+            return null;
+          case 'Glob':
+          case 'Grep':
+            headerParts.push(`:mag: *Searching* ${input.pattern ? `\`${input.pattern}\`` : ''}`);
+            break;
           default:
-            parts.push(this.formatGenericTool(toolName, input));
+            headerParts.push(`:wrench: *Using ${toolName}*`);
         }
       }
     }
 
-    return parts.join('\n\n');
+    if (headerParts.length === 0 && attachments.length === 0) return null;
+    return {
+      text: headerParts.length > 0 ? headerParts.join('\n') : undefined,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    };
   }
 
-  private formatEditTool(toolName: string, input: any): string {
+  private formatEditToolRich(
+    toolName: string,
+    input: any,
+    headerParts: string[],
+    attachments: Array<{ color: string; text: string }>
+  ): void {
     const filePath = input.file_path;
     const edits = toolName === 'MultiEdit' ? input.edits : [{ old_string: input.old_string, new_string: input.new_string }];
 
-    let result = `:pencil2: *Editing \`${filePath}\`*\n`;
+    headerParts.push(`:pencil2: *Editing \`${filePath}\`*`);
 
     for (const edit of edits) {
-      result += '\n```diff\n';
-      result += `- ${this.truncateString(edit.old_string, 200)}\n`;
-      result += `+ ${this.truncateString(edit.new_string, 200)}\n`;
-      result += '```';
+      const oldStr = this.truncateString(edit.old_string, 200);
+      const newStr = this.truncateString(edit.new_string, 200);
+      if (oldStr) {
+        attachments.push({ color: '#E74C3C', text: `\`\`\`\n${oldStr}\n\`\`\`` }); // red for removed
+      }
+      if (newStr) {
+        attachments.push({ color: '#2ECC71', text: `\`\`\`\n${newStr}\n\`\`\`` }); // green for added
+      }
     }
-
-    return result;
   }
 
-  private formatWriteTool(input: any): string {
+  private formatWriteToolRich(
+    input: any,
+    headerParts: string[],
+    attachments: Array<{ color: string; text: string }>
+  ): void {
     const filePath = input.file_path;
     const preview = this.truncateString(input.content, 300);
 
-    return `:page_facing_up: *Creating \`${filePath}\`*\n\`\`\`\n${preview}\n\`\`\``;
+    headerParts.push(`:page_facing_up: *Creating \`${filePath}\`*`);
+    attachments.push({ color: '#3498DB', text: `\`\`\`\n${preview}\n\`\`\`` }); // blue for new file
   }
 
-  private formatReadTool(input: any): string {
-    return `:eye: *Reading \`${input.file_path}\`*`;
-  }
-
-  private formatBashTool(input: any): string {
-    return `:desktop_computer: *Running command:*\n\`\`\`bash\n${input.command}\n\`\`\``;
-  }
-
-  private formatGenericTool(toolName: string, input: any): string {
-    return `:wrench: *Using ${toolName}*`;
+  private formatBashToolRich(
+    input: any,
+    headerParts: string[],
+    attachments: Array<{ color: string; text: string }>
+  ): void {
+    headerParts.push(`:desktop_computer: *Running command:*`);
+    attachments.push({ color: '#2C3E50', text: `\`\`\`\n${input.command}\n\`\`\`` }); // dark for terminal
   }
 
   private truncateString(str: string, maxLength: number): string {
