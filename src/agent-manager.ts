@@ -601,6 +601,129 @@ export class AgentManager {
       }
     }
 
+    // Fallback: natural language parsing
+    return this.naturalLanguageParse(trimmed, channelId);
+  }
+
+  private naturalLanguageParse(text: string, channelId: string): ParsedCommand {
+    const lower = text.toLowerCase();
+    const agents = this.listAgents(channelId);
+    const agentNames = agents.map(a => a.name.toLowerCase());
+
+    // Find agent name mentioned in text
+    const findAgent = (): string | undefined => {
+      for (const agent of agents) {
+        if (lower.includes(agent.name.toLowerCase())) return agent.name;
+      }
+      return undefined;
+    };
+
+    // Global rules: "add a global rule ...", "make a rule for all agents ...", "all agents should ..."
+    if (/\bglobal\s+rule|rule.*(all\s+agents|every\s+agent)|all\s+agents?\s+should|add\s+.*rule\s+.*(?:all|every|global)/i.test(text)) {
+      // Extract the rule text — everything after the intent keywords
+      const ruleMatch = text.match(/(?:rule[s]?\s*(?:that|to|:)?\s*|should\s+)(.+)$/is)
+        || text.match(/(?:global\s+rule[s]?\s*)(.+)$/is);
+      if (ruleMatch) {
+        return { type: 'set_global_rules', args: ruleMatch[1].trim() };
+      }
+    }
+
+    // Clear global rules
+    if (/\b(clear|remove|delete)\b.*\bglobal\s+rule/i.test(text)) {
+      return { type: 'clear_global_rules' };
+    }
+
+    // Show global rules
+    if (/\b(show|display|what)\b.*\bglobal\s+rule/i.test(text)) {
+      return { type: 'show_global_rules' };
+    }
+
+    // Per-agent rules: "add a rule to lina ...", "set lina's rules to ..."
+    if (/\brule/i.test(text)) {
+      const agent = findAgent();
+      if (agent) {
+        if (/\b(clear|remove|delete)\b/i.test(text)) {
+          return { type: 'clear_rules', agentName: agent };
+        }
+        const ruleMatch = text.match(/(?:rule[s]?\s*(?:that|to|:)?\s*|should\s+)(.+)$/is);
+        if (ruleMatch) {
+          return { type: 'set_rules', agentName: agent, args: ruleMatch[1].trim() };
+        }
+      }
+    }
+
+    // Create agent: "make an agent called X on Y", "add agent X working on Y"
+    if (/\b(create|make|add|new)\b.*\bagent\b/i.test(text)) {
+      const createMatch = text.match(/agent\s+(?:called\s+|named\s+)?(\S+)\s+(?:on|for|in|working\s+on|at)\s+(.+)$/i);
+      if (createMatch) {
+        return { type: 'create_agent', agentName: createMatch[1], args: createMatch[2].trim() };
+      }
+    }
+
+    // Remove agent: "delete agent X", "remove lina"
+    if (/\b(remove|delete|destroy)\b/i.test(text)) {
+      const agent = findAgent();
+      if (agent) {
+        return { type: 'remove_agent', agentName: agent };
+      }
+    }
+
+    // Rename agent: "rename lina to macy", "change lina's name to macy"
+    if (/\b(rename|change\s+.*name)/i.test(text)) {
+      const agent = findAgent();
+      if (agent) {
+        const newNameMatch = text.match(/\bto\s+(\S+)\s*$/i);
+        if (newNameMatch) {
+          return { type: 'rename_agent', agentName: agent, args: newNameMatch[1] };
+        }
+      }
+    }
+
+    // Quiet mode: "make lina quiet", "turn off quiet for lina", "mute lina"
+    if (/\b(quiet|mute|silent)\b/i.test(text)) {
+      const agent = findAgent();
+      if (agent) {
+        const off = /\b(off|disable|un-?mute|loud)\b/i.test(text);
+        return { type: 'quiet_mode', agentName: agent, args: off ? 'off' : 'on' };
+      }
+    }
+
+    // Model: "make lina fast", "switch lina to sonnet", "use opus for lina"
+    if (/\b(fast|sonnet)\b/i.test(text)) {
+      const agent = findAgent();
+      if (agent) return { type: 'set_model', agentName: agent, args: 'sonnet' };
+    }
+    if (/\b(smart|opus)\b/i.test(text) && /\b(model|switch|use|set|make)\b/i.test(text)) {
+      const agent = findAgent();
+      if (agent) return { type: 'set_model', agentName: agent, args: 'opus' };
+    }
+
+    // Status: "how is lina doing", "what is lina's status", "is lina busy"
+    if (/\b(status|how\s+is|doing|busy|idle)\b/i.test(text)) {
+      const agent = findAgent();
+      if (agent) return { type: 'agent_status', agentName: agent };
+    }
+
+    // List agents: "show me my agents", "what agents do I have", "who is here"
+    if (/\b(show|list|what|which|who)\b.*\bagents?\b/i.test(text) || /\bwho\s+is\s+here\b/i.test(text)) {
+      return { type: 'list_agents' };
+    }
+
+    // Help: "what can you do", "how does this work", "what commands"
+    if (/\bwhat\s+can\s+you\s+do\b|\bhow\s+does\s+this\s+work\b|\bwhat\s+commands\b/i.test(text)) {
+      return { type: 'help' };
+    }
+
+    // Templates: "what templates", "show templates"
+    if (/\b(show|list|what|which)\b.*\btemplates?\b/i.test(text)) {
+      return { type: 'list_templates' };
+    }
+
+    // Schedules: "show schedules", "what's scheduled"
+    if (/\b(show|list|what)\b.*\bschedule/i.test(text)) {
+      return { type: 'list_schedules' };
+    }
+
     return { type: 'none' };
   }
 
