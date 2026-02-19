@@ -28,6 +28,7 @@ export interface AgentConfig {
   quietMode?: boolean;
   template?: string;
   model?: AgentModel;
+  color?: string;
 }
 
 export type AgentStatus = 'idle' | 'processing' | 'error';

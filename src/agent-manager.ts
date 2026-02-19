@@ -5,6 +5,19 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 const AGENTS_FILE = path.join(__dirname, '..', 'agents.json');
+
+const AGENT_COLORS = [
+  '#3498DB', // blue
+  '#2ECC71', // green
+  '#E74C3C', // red
+  '#F39C12', // orange
+  '#9B59B6', // purple
+  '#1ABC9C', // teal
+  '#E91E63', // pink
+  '#00BCD4', // cyan
+  '#FF9800', // amber
+  '#8BC34A', // lime
+];
 const SCHEDULES_FILE = path.join(__dirname, '..', 'schedules.json');
 const GLOBAL_RULES_FILE = path.join(__dirname, '..', 'global-rules.json');
 
@@ -113,6 +126,13 @@ export class AgentManager {
       for (const [key, agent] of Object.entries(data)) {
         agent.createdAt = new Date(agent.createdAt);
         this.agents.set(key, agent);
+      }
+      // Auto-assign colors to agents that don't have one (pre-color migration)
+      for (const agent of this.agents.values()) {
+        if (!agent.color) {
+          const usedColors = this.listAgents(agent.channelId).filter(a => a.color).map(a => a.color);
+          agent.color = AGENT_COLORS.find(c => !usedColors.includes(c)) || AGENT_COLORS[this.agents.size % AGENT_COLORS.length];
+        }
       }
       this.logger.info('Loaded agents from disk', { count: this.agents.size });
     } catch (error) {
@@ -227,6 +247,9 @@ export class AgentManager {
       rules = tmpl.rules;
     }
 
+    const usedColors = this.listAgents(channelId).map(a => a.color);
+    const color = AGENT_COLORS.find(c => !usedColors.includes(c)) || AGENT_COLORS[this.agents.size % AGENT_COLORS.length];
+
     const agent: AgentConfig = {
       name,
       workingDirectory: resolvedPath,
@@ -235,6 +258,7 @@ export class AgentManager {
       createdAt: new Date(),
       rules,
       template,
+      color,
     };
 
     this.agents.set(key, agent);

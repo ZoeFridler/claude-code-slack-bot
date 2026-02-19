@@ -102,6 +102,7 @@ export class SlackHandler {
         bypassPermissions: true,
         quietMode: agent.quietMode,
         model: this.resolveModel(agent.model),
+        agentColor: agent.color,
       });
     });
   }
@@ -379,13 +380,17 @@ export class SlackHandler {
   ): Promise<void> {
     const result = this.agentManager.createAgent(agentName, directory, channel, user);
     if (result.success) {
+      const agentColor = result.agent!.color;
       await say({
         text: `Agent *${agentName}* created on \`${result.agent!.workingDirectory}\``,
         thread_ts: threadTs,
       });
-      await say({
-        text: `[${agentName}] Hi! I'm *${agentName}* and I'll be working on \`${result.agent!.workingDirectory}\`. Mention me with \`@${agentName}\` to ask me anything about this project.`,
-      });
+      const greeting = `[${agentName}] Hi! I'm *${agentName}* and I'll be working on \`${result.agent!.workingDirectory}\`. Mention me with \`@${agentName}\` to ask me anything about this project.`;
+      if (agentColor) {
+        await say({ attachments: [{ color: agentColor, text: greeting, mrkdwn_in: ['text'] }] });
+      } else {
+        await say({ text: greeting });
+      }
     } else {
       await say({
         text: `${result.error}`,
@@ -410,9 +415,13 @@ export class SlackHandler {
         text: `Agent *${agentName}* created on \`${result.agent!.workingDirectory}\` using template *${templateName}*`,
         thread_ts: threadTs,
       });
-      await say({
-        text: `[${agentName}] Hi! I'm *${agentName}* (${template?.description || templateName}) and I'll be working on \`${result.agent!.workingDirectory}\`. Mention me with \`@${agentName}\` to ask me anything.`,
-      });
+      const templateGreeting = `[${agentName}] Hi! I'm *${agentName}* (${template?.description || templateName}) and I'll be working on \`${result.agent!.workingDirectory}\`. Mention me with \`@${agentName}\` to ask me anything.`;
+      const templateColor = result.agent!.color;
+      if (templateColor) {
+        await say({ attachments: [{ color: templateColor, text: templateGreeting, mrkdwn_in: ['text'] }] });
+      } else {
+        await say({ text: templateGreeting });
+      }
     } else {
       await say({
         text: `${result.error}`,
@@ -705,6 +714,7 @@ export class SlackHandler {
         bypassPermissions: true,
         quietMode: agent.quietMode,
         model: this.resolveModel(agent.model),
+        agentColor: agent.color,
       });
       this.agentStatuses.set(agentKey, 'idle');
     } catch (error) {
@@ -737,10 +747,18 @@ export class SlackHandler {
     }
 
     // Step 1: Ask the target agent the question
-    await say({
-      text: `[${askingAgent}] Asking *${targetAgent}* about: "${question}"`,
-      thread_ts: threadTs || ts,
-    });
+    const askerColor = asker.color;
+    if (askerColor) {
+      await say({
+        attachments: [{ color: askerColor, text: `[${askingAgent}] Asking *${targetAgent}* about: "${question}"`, mrkdwn_in: ['text'] }],
+        thread_ts: threadTs || ts,
+      });
+    } else {
+      await say({
+        text: `[${askingAgent}] Asking *${targetAgent}* about: "${question}"`,
+        thread_ts: threadTs || ts,
+      });
+    }
 
     // Collect target agent's response
     const targetSessionKey = this.claudeHandler.getAgentSessionKey(targetAgent, channel, `cross-${ts}`);
@@ -794,10 +812,18 @@ export class SlackHandler {
 
     // Post target's response
     if (targetResponse) {
-      await say({
-        text: `[${targetAgent}] ${this.formatMessage(targetResponse, true)}`,
-        thread_ts: threadTs || ts,
-      });
+      const targetColor = target.color;
+      if (targetColor) {
+        await say({
+          attachments: [{ color: targetColor, text: `[${targetAgent}] ${this.formatMessage(targetResponse, true)}`, mrkdwn_in: ['text'] }],
+          thread_ts: threadTs || ts,
+        });
+      } else {
+        await say({
+          text: `[${targetAgent}] ${this.formatMessage(targetResponse, true)}`,
+          thread_ts: threadTs || ts,
+        });
+      }
     }
 
     // Step 2: Send target's response to the asking agent
@@ -916,11 +942,20 @@ export class SlackHandler {
         break;
       }
 
-      // Post the agent's response
-      await say({
-        text: `[${currentAgent}] ${this.formatMessage(response, true)}`,
-        thread_ts: replyTs,
-      });
+      // Post the agent's response with color
+      const currentAgentConfig = this.agentManager.getAgent(currentAgent, channel);
+      const agentColor = currentAgentConfig?.color;
+      if (agentColor) {
+        await say({
+          attachments: [{ color: agentColor, text: `[${currentAgent}] ${this.formatMessage(response, true)}`, mrkdwn_in: ['text'] }],
+          thread_ts: replyTs,
+        });
+      } else {
+        await say({
+          text: `[${currentAgent}] ${this.formatMessage(response, true)}`,
+          thread_ts: replyTs,
+        });
+      }
 
       // Check if the agent signaled completion
       if (/\bDONE\b/.test(response)) {
@@ -994,10 +1029,22 @@ export class SlackHandler {
     bypassPermissions?: boolean;
     quietMode?: boolean;
     model?: string;
+    agentColor?: string;
   }): Promise<void> {
-    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix, bypassPermissions, quietMode, model } = opts;
+    const { prompt, session, sessionKey, workingDirectory, channel, threadTs, ts, user, say, processedFiles, messagePrefix, bypassPermissions, quietMode, model, agentColor } = opts;
     const replyTs = threadTs || ts;
     const prefix = messagePrefix ? `${messagePrefix} ` : '';
+
+    // Helper to post messages with agent color
+    const colorSay = async (text: string, threadTs?: string) => {
+      if (agentColor) {
+        return await say({
+          attachments: [{ color: agentColor, text, mrkdwn_in: ['text'] }],
+          ...(threadTs ? { thread_ts: threadTs } : {}),
+        });
+      }
+      return await say({ text, ...(threadTs ? { thread_ts: threadTs } : {}) });
+    };
 
     // Store the original message info for status reactions
     this.originalMessages.set(sessionKey, { channel, ts: replyTs });
@@ -1102,10 +1149,7 @@ export class SlackHandler {
             if (!quietMode) {
               const toolContent = this.formatToolUse(message.message.content);
               if (toolContent) {
-                await say({
-                  text: `${prefix}${toolContent}`,
-                  thread_ts: replyTs,
-                });
+                await colorSay(`${prefix}${toolContent}`, replyTs);
               }
             }
           } else {
@@ -1116,10 +1160,7 @@ export class SlackHandler {
               currentMessages.push(content);
 
               const formatted = this.formatMessage(content, false);
-              await say({
-                text: `${prefix}${formatted}`,
-                thread_ts: replyTs,
-              });
+              await colorSay(`${prefix}${formatted}`, replyTs);
             }
           }
         } else if (message.type === 'result') {
@@ -1134,10 +1175,7 @@ export class SlackHandler {
             const finalResult = (message as any).result;
             if (finalResult && !currentMessages.includes(finalResult)) {
               const formatted = this.formatMessage(finalResult, true);
-              await say({
-                text: `${prefix}${formatted}`,
-                thread_ts: replyTs,
-              });
+              await colorSay(`${prefix}${formatted}`, replyTs);
             }
           }
         }
