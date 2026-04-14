@@ -7,6 +7,15 @@ import { Logger } from './logger';
 
 const logger = new Logger('Main');
 
+// Prevent unhandled errors from killing the process
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled promise rejection', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception', error);
+});
+
 async function start() {
   try {
     // Validate configuration
@@ -26,10 +35,15 @@ async function start() {
       appToken: config.slack.appToken,
     });
 
+    // Log Slack connection errors without crashing
+    app.error(async (error) => {
+      logger.error('Slack app error', error);
+    });
+
     // Initialize MCP manager
     const mcpManager = new McpManager();
     const mcpConfig = mcpManager.loadConfiguration();
-    
+
     // Initialize handlers
     const claudeHandler = new ClaudeHandler(mcpManager);
     const slackHandler = new SlackHandler(app, claudeHandler, mcpManager);

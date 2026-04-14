@@ -56,48 +56,49 @@ export class SlackHandler {
 
     // Set up scheduled task callback
     this.agentManager.setScheduleCallback(async (task) => {
-      this.logger.info('Running scheduled task', { taskId: task.id, agent: task.agentName });
-      const agent = this.agentManager.getAgent(task.agentName, task.channelId);
-      if (!agent) {
-        this.logger.warn('Scheduled task agent not found', { taskId: task.id, agent: task.agentName });
-        return;
-      }
+      try {
+        this.logger.info('Running scheduled task', { taskId: task.id, agent: task.agentName });
+        const agent = this.agentManager.getAgent(task.agentName, task.channelId);
+        if (!agent) {
+          this.logger.warn('Scheduled task agent not found', { taskId: task.id, agent: task.agentName });
+          return;
+        }
 
-      // Post a message indicating the scheduled task is running
-      await this.app.client.chat.postMessage({
-        channel: task.channelId,
-        text: `[${task.agentName}] :clock1: Running scheduled task: "${task.message}"`,
-      });
-
-      // Execute the agent message
-      const sessionKey = this.claudeHandler.getAgentSessionKey(task.agentName, task.channelId, 'scheduled');
-      let session = this.claudeHandler.getAgentSession(task.agentName, task.channelId, 'scheduled');
-      if (!session) {
-        session = this.claudeHandler.createAgentSession(task.agentName, task.channelId, 'scheduled');
-      }
-
-      const identityPrompt = this.buildIdentityPrompt(agent);
-      const finalPrompt = `${identityPrompt}\n\n${task.message}`;
-
-      // Use a temporary say function that posts to the channel
-      const say = async (msg: any) => {
-        return await this.app.client.chat.postMessage({
+        // Post a message indicating the scheduled task is running
+        await this.app.client.chat.postMessage({
           channel: task.channelId,
-          text: msg.text,
-          thread_ts: msg.thread_ts,
+          text: `[${task.agentName}] :clock1: Running scheduled task: "${task.message}"`,
         });
-      };
 
-      await this.executeQuery({
-        prompt: finalPrompt,
-        session,
-        sessionKey,
-        workingDirectory: agent.workingDirectory,
-        channel: task.channelId,
-        threadTs: undefined,
-        ts: Date.now().toString(),
-        user: task.createdBy,
-        say,
+        // Execute the agent message
+        const sessionKey = this.claudeHandler.getAgentSessionKey(task.agentName, task.channelId, 'scheduled');
+        let session = this.claudeHandler.getAgentSession(task.agentName, task.channelId, 'scheduled');
+        if (!session) {
+          session = this.claudeHandler.createAgentSession(task.agentName, task.channelId, 'scheduled');
+        }
+
+        const identityPrompt = this.buildIdentityPrompt(agent);
+        const finalPrompt = `${identityPrompt}\n\n${task.message}`;
+
+        // Use a temporary say function that posts to the channel
+        const say = async (msg: any) => {
+          return await this.app.client.chat.postMessage({
+            channel: task.channelId,
+            text: msg.text,
+            thread_ts: msg.thread_ts,
+          });
+        };
+
+        await this.executeQuery({
+          prompt: finalPrompt,
+          session,
+          sessionKey,
+          workingDirectory: agent.workingDirectory,
+          channel: task.channelId,
+          threadTs: undefined,
+          ts: Date.now().toString(),
+          user: task.createdBy,
+          say,
         processedFiles: [],
         messagePrefix: `[${task.agentName}]`,
         bypassPermissions: true,
@@ -105,6 +106,9 @@ export class SlackHandler {
         model: this.resolveModel(agent.model),
         agentColor: agent.color,
       });
+      } catch (error) {
+        this.logger.error('Error running scheduled task', error);
+      }
     });
   }
 
@@ -1646,66 +1650,90 @@ export class SlackHandler {
   setupEventHandlers() {
     // Handle direct messages
     this.app.message(async ({ message, say }) => {
-      if (message.subtype === undefined && 'user' in message) {
-        this.logger.info('Handling direct message event');
-        await this.handleMessage(message as MessageEvent, say);
+      try {
+        if (message.subtype === undefined && 'user' in message) {
+          this.logger.info('Handling direct message event');
+          await this.handleMessage(message as MessageEvent, say);
+        }
+      } catch (error) {
+        this.logger.error('Error handling direct message', error);
       }
     });
 
     // Handle app mentions
     this.app.event('app_mention', async ({ event, say }) => {
-      this.logger.info('Handling app mention event');
-      const text = event.text.replace(/<@[^>]+>/g, '').trim();
-      await this.handleMessage({
-        ...event,
-        text,
-      } as MessageEvent, say);
+      try {
+        this.logger.info('Handling app mention event');
+        const text = event.text.replace(/<@[^>]+>/g, '').trim();
+        await this.handleMessage({
+          ...event,
+          text,
+        } as MessageEvent, say);
+      } catch (error) {
+        this.logger.error('Error handling app mention', error);
+      }
     });
 
     // Handle file uploads in threads
     this.app.event('message', async ({ event, say }) => {
-      // Only handle file uploads that are not from bots and have files
-      if (event.subtype === 'file_share' && 'user' in event && event.files) {
-        this.logger.info('Handling file upload event');
-        await this.handleMessage(event as MessageEvent, say);
+      try {
+        // Only handle file uploads that are not from bots and have files
+        if (event.subtype === 'file_share' && 'user' in event && event.files) {
+          this.logger.info('Handling file upload event');
+          await this.handleMessage(event as MessageEvent, say);
+        }
+      } catch (error) {
+        this.logger.error('Error handling file upload', error);
       }
     });
 
     // Handle bot being added to channels
     this.app.event('member_joined_channel', async ({ event, say }) => {
-      // Check if the bot was added to the channel
-      if (event.user === await this.getBotUserId()) {
-        this.logger.info('Bot added to channel', { channel: event.channel });
-        await this.handleChannelJoin(event.channel, say);
+      try {
+        // Check if the bot was added to the channel
+        if (event.user === await this.getBotUserId()) {
+          this.logger.info('Bot added to channel', { channel: event.channel });
+          await this.handleChannelJoin(event.channel, say);
+        }
+      } catch (error) {
+        this.logger.error('Error handling channel join', error);
       }
     });
 
     // Handle permission approval button clicks
     this.app.action('approve_tool', async ({ ack, body, respond }) => {
-      await ack();
-      const approvalId = (body as any).actions[0].value;
-      this.logger.info('Tool approval granted', { approvalId });
+      try {
+        await ack();
+        const approvalId = (body as any).actions[0].value;
+        this.logger.info('Tool approval granted', { approvalId });
 
-      permissionServer.resolveApproval(approvalId, true);
+        permissionServer.resolveApproval(approvalId, true);
 
-      await respond({
-        response_type: 'ephemeral',
-        text: 'Tool execution approved'
-      });
+        await respond({
+          response_type: 'ephemeral',
+          text: 'Tool execution approved'
+        });
+      } catch (error) {
+        this.logger.error('Error handling tool approval', error);
+      }
     });
 
     // Handle permission denial button clicks
     this.app.action('deny_tool', async ({ ack, body, respond }) => {
-      await ack();
-      const approvalId = (body as any).actions[0].value;
-      this.logger.info('Tool approval denied', { approvalId });
+      try {
+        await ack();
+        const approvalId = (body as any).actions[0].value;
+        this.logger.info('Tool approval denied', { approvalId });
 
-      permissionServer.resolveApproval(approvalId, false);
+        permissionServer.resolveApproval(approvalId, false);
 
-      await respond({
-        response_type: 'ephemeral',
-        text: 'Tool execution denied'
-      });
+        await respond({
+          response_type: 'ephemeral',
+          text: 'Tool execution denied'
+        });
+      } catch (error) {
+        this.logger.error('Error handling tool denial', error);
+      }
     });
 
     // Cleanup inactive sessions periodically
